@@ -16,7 +16,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"maunium.net/go/mautrix"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
 )
 
 func (intent *IntentAPI) EnsureAppserviceConnection(ctx context.Context) {
