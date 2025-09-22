@@ -121,6 +121,11 @@ const (
 		), '')
 		WHERE receiver='' AND bridge_id=$1
 	`
+	UpdateSetRelayFromUserQuery = `
+		UPDATE portal
+		SET relay_login_id=$1
+		WHERE receiver = $1 AND relay_login_id IS NULL OR relay_login_id = ''
+	`
 )
 
 func (pq *PortalQuery) GetByKey(ctx context.Context, key networkid.PortalKey) (*Portal, error) {
@@ -183,6 +188,10 @@ func (pq *PortalQuery) MigrateToSplitPortals(ctx context.Context) (int64, error)
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func (pq *PortalQuery) UpdateSetRelayFromUser(ctx context.Context, loginID string) error {
+	return pq.Exec(ctx, UpdateSetRelayFromUserQuery, loginID)
 }
 
 func (p *Portal) Scan(row dbutil.Scannable) (*Portal, error) {
