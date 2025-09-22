@@ -4572,3 +4572,24 @@ func (portal *Portal) PerMessageProfileForSender(ctx context.Context, sender net
 	}
 	return
 }
+
+func (br *Bridge) UpdateSetRelayFromUser(
+	ctx context.Context, loginID string,
+) error {
+	if loginID == "" {
+		return fmt.Errorf("userLoginID is empty")
+	}
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	err := br.DB.Portal.UpdateSetRelayFromUser(ctx, loginID)
+
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update relay login ID from user")
+	} else {
+		zerolog.Ctx(ctx).Info().Str(
+			"user_login_id", loginID,
+		).Msg("Updated relay login ID from user, cleared portal cache")
+	}
+
+	return err
+}
