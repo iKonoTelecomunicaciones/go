@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Tulir Asokan
+// Copyright (c) 2025 Tulir Asokan
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -10,11 +10,16 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"maps"
+	"slices"
 	"strings"
-	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/provisionutil"
+	"github.com/iKonoTelecomunicaciones/go/event"
 	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
@@ -57,24 +62,13 @@ func getClientForStartingChat[T bridgev2.IdentifierResolvingNetworkAPI](ce *Even
 	return login, api, remainingArgs
 }
 
-func formatResolveIdentifierResult(ctx context.Context, resp *bridgev2.ResolveIdentifierResponse) string {
-	var targetName string
-	var targetMXID id.UserID
-	if resp.Ghost != nil {
-		if resp.UserInfo != nil {
-			resp.Ghost.UpdateInfo(ctx, resp.UserInfo)
-		}
-		targetName = resp.Ghost.Name
-		targetMXID = resp.Ghost.Intent.GetMXID()
-	} else if resp.UserInfo != nil && resp.UserInfo.Name != nil {
-		targetName = *resp.UserInfo.Name
-	}
-	if targetMXID != "" {
-		return fmt.Sprintf("`%s` / [%s](%s)", resp.UserID, targetName, targetMXID.URI().MatrixToURL())
-	} else if targetName != "" {
-		return fmt.Sprintf("`%s` / %s", resp.UserID, targetName)
+func formatResolveIdentifierResult(resp *provisionutil.RespResolveIdentifier) string {
+	if resp.MXID != "" {
+		return fmt.Sprintf("`%s` / [%s](%s)", resp.ID, resp.Name, resp.MXID.URI().MatrixToURL())
+	} else if resp.Name != "" {
+		return fmt.Sprintf("`%s` / %s", resp.ID, resp.Name)
 	} else {
-		return fmt.Sprintf("`%s`", resp.UserID)
+		return fmt.Sprintf("`%s`", resp.ID)
 	}
 }
 
@@ -89,61 +83,119 @@ func fnResolveIdentifier(ce *Event) {
 	}
 	createChat := ce.Command == "start-chat" || ce.Command == "pm"
 	identifier := strings.Join(identifierParts, " ")
-	resp, err := api.ResolveIdentifier(ce.Ctx, identifier, createChat)
+	resp, err := provisionutil.ResolveIdentifier(ce.Ctx, login, identifier, createChat)
 	if err != nil {
-		ce.Log.Err(err).Msg("Failed to resolve identifier")
 		ce.Reply("Failed to resolve identifier: %v", err)
 		return
 	} else if resp == nil {
 		ce.ReplyAdvanced(fmt.Sprintf("Identifier <code>%s</code> not found", html.EscapeString(identifier)), false, true)
 		return
 	}
-	formattedName := formatResolveIdentifierResult(ce.Ctx, resp)
+	formattedName := formatResolveIdentifierResult(resp)
 	if createChat {
-		if resp.Chat == nil {
-			ce.Reply("Interface error: network connector did not return chat for create chat request")
-			return
+		name := resp.Portal.Name
+		if name == "" {
+			name = resp.Portal.MXID.String()
 		}
-		portal := resp.Chat.Portal
-		if portal == nil {
-			portal, err = ce.Bridge.GetPortalByKey(ce.Ctx, resp.Chat.PortalKey)
-			if err != nil {
-				ce.Log.Err(err).Msg("Failed to get portal")
-				ce.Reply("Failed to get portal: %v", err)
-				return
-			}
-		}
-		if resp.Chat.PortalInfo == nil {
-			resp.Chat.PortalInfo, err = api.GetChatInfo(ce.Ctx, portal)
-			if err != nil {
-				ce.Log.Err(err).Msg("Failed to get portal info")
-				ce.Reply("Failed to get portal info: %v", err)
-				return
-			}
-		}
-		if portal.MXID != "" {
-			name := portal.Name
-			if name == "" {
-				name = portal.MXID.String()
-			}
-			portal.UpdateInfo(ce.Ctx, resp.Chat.PortalInfo, login, nil, time.Time{})
-			ce.Reply("You already have a direct chat with %s at [%s](%s)", formattedName, name, portal.MXID.URI().MatrixToURL())
+		if !resp.JustCreated {
+			ce.Reply("You already have a direct chat with %s at [%s](%s)", formattedName, name, resp.Portal.MXID.URI().MatrixToURL())
 		} else {
-			err = portal.CreateMatrixRoom(ce.Ctx, login, resp.Chat.PortalInfo)
-			if err != nil {
-				ce.Log.Err(err).Msg("Failed to create room")
-				ce.Reply("Failed to create room: %v", err)
-				return
-			}
-			name := portal.Name
-			if name == "" {
-				name = portal.MXID.String()
-			}
-			ce.Reply("Created chat with %s: [%s](%s)", formattedName, name, portal.MXID.URI().MatrixToURL())
+			ce.Reply("Created chat with %s: [%s](%s)", formattedName, name, resp.Portal.MXID.URI().MatrixToURL())
 		}
 	} else {
 		ce.Reply("Found %s", formattedName)
 	}
+}
+
+var CommandCreateGroup = &FullHandler{
+	Func:    fnCreateGroup,
+	Name:    "create-group",
+	Aliases: []string{"create"},
+	Help: HelpMeta{
+		Section:     HelpSectionChats,
+		Description: "Create a new group chat for the current Matrix room",
+		Args:        "[_group type_]",
+	},
+	RequiresLogin: true,
+	NetworkAPI:    NetworkAPIImplements[bridgev2.GroupCreatingNetworkAPI],
+}
+
+func getState[T any](ctx context.Context, roomID id.RoomID, evtType event.Type, provider bridgev2.MatrixConnectorWithArbitraryRoomState) (content T) {
+	evt, err := provider.GetStateEvent(ctx, roomID, evtType, "")
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Stringer("event_type", evtType).Msg("Failed to get state event for group creation")
+	} else if evt != nil {
+		content, _ = evt.Content.Parsed.(T)
+	}
+	return
+}
+
+func fnCreateGroup(ce *Event) {
+	ce.Bridge.Matrix.GetCapabilities()
+	login, api, remainingArgs := getClientForStartingChat[bridgev2.GroupCreatingNetworkAPI](ce, "creating group")
+	if api == nil {
+		return
+	}
+	stateProvider, ok := ce.Bridge.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState)
+	if !ok {
+		ce.Reply("Matrix connector doesn't support fetching room state")
+		return
+	}
+	members, err := ce.Bridge.Matrix.GetMembers(ce.Ctx, ce.RoomID)
+	if err != nil {
+		ce.Log.Err(err).Msg("Failed to get room members for group creation")
+		ce.Reply("Failed to get room members: %v", err)
+		return
+	}
+	caps := ce.Bridge.Network.GetCapabilities()
+	params := &bridgev2.GroupCreateParams{
+		Username:     "",
+		Participants: make([]networkid.UserID, 0, len(members)-2),
+		Parent:       nil, // TODO check space parent event
+		Name:         getState[*event.RoomNameEventContent](ce.Ctx, ce.RoomID, event.StateRoomName, stateProvider),
+		Avatar:       getState[*event.RoomAvatarEventContent](ce.Ctx, ce.RoomID, event.StateRoomAvatar, stateProvider),
+		Topic:        getState[*event.TopicEventContent](ce.Ctx, ce.RoomID, event.StateTopic, stateProvider),
+		Disappear:    getState[*event.BeeperDisappearingTimer](ce.Ctx, ce.RoomID, event.StateBeeperDisappearingTimer, stateProvider),
+		RoomID:       ce.RoomID,
+	}
+	for userID, member := range members {
+		if userID == ce.User.MXID || userID == ce.Bot.GetMXID() || !member.Membership.IsInviteOrJoin() {
+			continue
+		}
+		if parsedUserID, ok := ce.Bridge.Matrix.ParseGhostMXID(userID); ok {
+			params.Participants = append(params.Participants, parsedUserID)
+		} else if !ce.Bridge.Config.SplitPortals {
+			if user, err := ce.Bridge.GetExistingUserByMXID(ce.Ctx, userID); err != nil {
+				ce.Log.Err(err).Stringer("user_id", userID).Msg("Failed to get user for room member")
+			} else if user != nil {
+				// TODO add user logins to participants
+				//for _, login := range user.GetUserLogins() {
+				//	params.Participants = append(params.Participants, login.GetUserID())
+				//}
+			}
+		}
+	}
+
+	if len(caps.Provisioning.GroupCreation) == 0 {
+		ce.Reply("No group creation types defined in network capabilities")
+		return
+	} else if len(remainingArgs) > 0 {
+		params.Type = remainingArgs[0]
+	} else if len(caps.Provisioning.GroupCreation) == 1 {
+		for params.Type = range caps.Provisioning.GroupCreation {
+			// The loop assigns the variable we want
+		}
+	} else {
+		types := strings.Join(slices.Collect(maps.Keys(caps.Provisioning.GroupCreation)), "`, `")
+		ce.Reply("Please specify type of group to create: `%s`", types)
+		return
+	}
+	resp, err := provisionutil.CreateGroup(ce.Ctx, login, params)
+	if err != nil {
+		ce.Reply("Failed to create group: %v", err)
+		return
+	}
+	ce.Reply("Successfully created group `%s`", resp.ID)
 }
 
 var CommandSearch = &FullHandler{
@@ -163,34 +215,25 @@ func fnSearch(ce *Event) {
 		ce.Reply("Usage: `$cmdprefix search <query>`")
 		return
 	}
-	_, api, queryParts := getClientForStartingChat[bridgev2.UserSearchingNetworkAPI](ce, "searching users")
+	login, api, queryParts := getClientForStartingChat[bridgev2.UserSearchingNetworkAPI](ce, "searching users")
 	if api == nil {
 		return
 	}
-	results, err := api.SearchUsers(ce.Ctx, strings.Join(queryParts, " "))
+	resp, err := provisionutil.SearchUsers(ce.Ctx, login, strings.Join(queryParts, " "))
 	if err != nil {
-		ce.Log.Err(err).Msg("Failed to search for users")
 		ce.Reply("Failed to search for users: %v", err)
 		return
 	}
-	resultsString := make([]string, len(results))
-	for i, res := range results {
-		formattedName := formatResolveIdentifierResult(ce.Ctx, res)
+	resultsString := make([]string, len(resp.Results))
+	for i, res := range resp.Results {
+		formattedName := formatResolveIdentifierResult(res)
 		resultsString[i] = fmt.Sprintf("* %s", formattedName)
-		if res.Chat != nil {
-			if res.Chat.Portal == nil {
-				res.Chat.Portal, err = ce.Bridge.GetExistingPortalByKey(ce.Ctx, res.Chat.PortalKey)
-				if err != nil {
-					ce.Log.Err(err).Object("portal_key", res.Chat.PortalKey).Msg("Failed to get DM portal")
-				}
+		if res.Portal != nil && res.Portal.MXID != "" {
+			portalName := res.Portal.Name
+			if portalName == "" {
+				portalName = res.Portal.MXID.String()
 			}
-			if res.Chat.Portal != nil && res.Chat.Portal.MXID != "" {
-				portalName := res.Chat.Portal.Name
-				if portalName == "" {
-					portalName = res.Chat.Portal.MXID.String()
-				}
-				resultsString[i] = fmt.Sprintf("%s - DM portal: [%s](%s)", resultsString[i], portalName, res.Chat.Portal.MXID.URI().MatrixToURL())
-			}
+			resultsString[i] = fmt.Sprintf("%s - DM portal: [%s](%s)", resultsString[i], portalName, res.Portal.MXID.URI().MatrixToURL())
 		}
 	}
 	ce.Reply("Search results:\n\n%s", strings.Join(resultsString, "\n"))

@@ -2,4 +2,10 @@
 
 package crypto
 
-import _ "github.com/iKonoTelecomunicaciones/go/crypto/goolm"
+import (
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm"
+)
+
+func init() {
+	goolm.Register()
+}
