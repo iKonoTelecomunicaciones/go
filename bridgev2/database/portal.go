@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/util/dbutil"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/event"
 	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
@@ -34,9 +35,20 @@ type PortalQuery struct {
 	*dbutil.QueryHelper[*Portal]
 }
 
+type CapStateFlags uint32
+
+func (csf CapStateFlags) Has(flag CapStateFlags) bool {
+	return csf&flag != 0
+}
+
+const (
+	CapStateFlagDisappearingTimerSet CapStateFlags = 1 << iota
+)
+
 type CapabilityState struct {
 	Source networkid.UserLoginID `json:"source"`
 	ID     string                `json:"id"`
+	Flags  CapStateFlags         `json:"flags"`
 }
 
 type Portal struct {
@@ -217,7 +229,7 @@ func (p *Portal) Scan(row dbutil.Scannable) (*Portal, error) {
 	}
 	if disappearType.Valid {
 		p.Disappear = DisappearingSetting{
-			Type:  DisappearingType(disappearType.String),
+			Type:  event.DisappearingType(disappearType.String),
 			Timer: time.Duration(disappearTimer.Int64),
 		}
 	}

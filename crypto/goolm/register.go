@@ -7,19 +7,24 @@
 package goolm
 
 import (
-	// Need to import these subpackages to ensure they are registered
-	_ "github.com/iKonoTelecomunicaciones/go/crypto/goolm/account"
-	_ "github.com/iKonoTelecomunicaciones/go/crypto/goolm/pk"
-	_ "github.com/iKonoTelecomunicaciones/go/crypto/goolm/session"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm/account"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm/pk"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm/session"
 
 	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
 )
 
-func init() {
+func Register() {
+	olm.Driver = "goolm"
+
 	olm.GetVersion = func() (major, minor, patch uint8) {
 		return 3, 2, 15
 	}
 	olm.SetPickleKeyImpl = func(key []byte) {
 		panic("gob and json encoding is deprecated and not supported with goolm")
 	}
+
+	account.Register()
+	pk.Register()
+	session.Register()
 }

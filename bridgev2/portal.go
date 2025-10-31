@@ -1101,15 +1101,11 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 		}
 		portal.sendSuccessStatus(ctx, evt, resp.StreamOrder, message.MXID)
 	}
-	if portal.Disappear.Type != database.DisappearingTypeNone {
+	if portal.Disappear.Type != event.DisappearingTypeNone {
 		go portal.Bridge.DisappearLoop.Add(ctx, &database.DisappearingMessage{
-			RoomID:  portal.MXID,
-			EventID: message.MXID,
-			DisappearingSetting: database.DisappearingSetting{
-				Type:        portal.Disappear.Type,
-				Timer:       portal.Disappear.Timer,
-				DisappearAt: message.Timestamp.Add(portal.Disappear.Timer),
-			},
+			RoomID:              portal.MXID,
+			EventID:             message.MXID,
+			DisappearingSetting: portal.Disappear.StartingAt(message.Timestamp),
 		})
 	}
 	if resp.Pending {
@@ -1500,7 +1496,9 @@ func handleMatrixRoomMeta[APIType any, ContentType any](
 		return EventHandlingResultFailed.WithMSSError(err)
 	}
 	if changed {
-		portal.UpdateBridgeInfo(ctx)
+		if evt.Type != event.StateBeeperDisappearingTimer {
+			portal.UpdateBridgeInfo(ctx)
+		}
 		err = portal.Save(ctx)
 		if err != nil {
 			log.Err(err).Msg("Failed to save portal after updating room metadata")
@@ -1820,42 +1818,134 @@ func (portal *Portal) handleMatrixTombstone(ctx context.Context, evt *event.Even
 			return EventHandlingResultIgnored
 		}
 	}
-
-	portal.Bridge.cacheLock.Lock()
-	if _, alreadyExists := portal.Bridge.portalsByMXID[content.ReplacementRoom]; alreadyExists {
-		log.Warn().Msg("Replacement room is already a portal, ignoring tombstone")
-		portal.Bridge.cacheLock.Unlock()
+	err = portal.UpdateMatrixRoomID(ctx, content.ReplacementRoom, UpdateMatrixRoomIDParams{
+		DeleteOldRoom: true,
+		FetchInfoVia:  senderUser,
+	})
+	if errors.Is(err, ErrTargetRoomIsPortal) {
 		return EventHandlingResultIgnored
+	} else if err != nil {
+		return EventHandlingResultFailed.WithError(err)
 	}
-	delete(portal.Bridge.portalsByMXID, portal.MXID)
-	portal.MXID = content.ReplacementRoom
+	return EventHandlingResultSuccess
+}
+
+var ErrTargetRoomIsPortal = errors.New("target room is already a portal")
+var ErrRoomAlreadyExists = errors.New("this portal already has a room")
+
+type UpdateMatrixRoomIDParams struct {
+	SyncDBMetadata     func()
+	FailIfMXIDSet      bool
+	OverwriteOldPortal bool
+	TombstoneOldRoom   bool
+	DeleteOldRoom      bool
+
+	RoomCreateAlreadyLocked bool
+
+	FetchInfoVia   *User
+	ChatInfo       *ChatInfo
+	ChatInfoSource *UserLogin
+}
+
+func (portal *Portal) UpdateMatrixRoomID(
+	ctx context.Context,
+	newRoomID id.RoomID,
+	params UpdateMatrixRoomIDParams,
+) error {
+	if !params.RoomCreateAlreadyLocked {
+		portal.roomCreateLock.Lock()
+		defer portal.roomCreateLock.Unlock()
+	}
+	oldRoom := portal.MXID
+	if oldRoom == newRoomID {
+		return nil
+	} else if oldRoom != "" && params.FailIfMXIDSet {
+		return ErrRoomAlreadyExists
+	}
+	log := zerolog.Ctx(ctx)
+	portal.Bridge.cacheLock.Lock()
+	// Wrap unlock in a sync.OnceFunc because we want to both defer it to catch early returns
+	// and unlock it before return if nothing goes wrong.
+	unlockCacheLock := sync.OnceFunc(portal.Bridge.cacheLock.Unlock)
+	defer unlockCacheLock()
+	if existingPortal, alreadyExists := portal.Bridge.portalsByMXID[newRoomID]; alreadyExists && !params.OverwriteOldPortal {
+		log.Warn().Msg("Replacement room is already a portal, ignoring")
+		return ErrTargetRoomIsPortal
+	} else if alreadyExists {
+		log.Debug().Msg("Replacement room is already a portal, overwriting")
+		existingPortal.MXID = ""
+		err := existingPortal.Save(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to clear mxid of existing portal: %w", err)
+		}
+		delete(portal.Bridge.portalsByMXID, portal.MXID)
+	}
+	portal.MXID = newRoomID
 	portal.Bridge.portalsByMXID[portal.MXID] = portal
 	portal.NameSet = false
 	portal.AvatarSet = false
 	portal.TopicSet = false
 	portal.InSpace = false
 	portal.CapState = database.CapabilityState{}
-	portal.Bridge.cacheLock.Unlock()
+	portal.lastCapUpdate = time.Time{}
+	if params.SyncDBMetadata != nil {
+		params.SyncDBMetadata()
+	}
+	unlockCacheLock()
+	portal.updateLogger()
 
-	err = portal.Save(ctx)
+	err := portal.Save(ctx)
 	if err != nil {
-		log.Err(err).Msg("Failed to save portal after tombstone")
-		return EventHandlingResultFailed.WithError(err)
+		log.Err(err).Msg("Failed to save portal in UpdateMatrixRoomID")
+		return err
 	}
 	log.Info().Msg("Successfully followed tombstone and updated portal MXID")
 	err = portal.Bridge.DB.UserPortal.MarkAllNotInSpace(ctx, portal.PortalKey)
 	if err != nil {
-		log.Err(err).Msg("Failed to update in_space flag for user portals after tombstone")
+		log.Err(err).Msg("Failed to update in_space flag for user portals after updating portal MXID")
 	}
 	go portal.addToUserSpaces(ctx)
-	go portal.updateInfoAfterTombstone(ctx, senderUser)
+	if params.FetchInfoVia != nil {
+		go portal.updateInfoAfterTombstone(ctx, params.FetchInfoVia)
+	} else if params.ChatInfo != nil {
+		go portal.UpdateInfo(ctx, params.ChatInfo, params.ChatInfoSource, nil, time.Time{})
+	} else if params.ChatInfoSource != nil {
+		portal.UpdateCapabilities(ctx, params.ChatInfoSource, true)
+		portal.UpdateBridgeInfo(ctx)
+	}
 	go func() {
-		err = portal.Bridge.Bot.DeleteRoom(ctx, evt.RoomID, true)
+		// TODO this might become unnecessary if UpdateInfo starts taking care of it
+		_, err = portal.Bridge.Bot.SendState(ctx, portal.MXID, event.StateElementFunctionalMembers, "", &event.Content{
+			Parsed: &event.ElementFunctionalMembersContent{
+				ServiceMembers: []id.UserID{portal.Bridge.Bot.GetMXID()},
+			},
+		}, time.Time{})
 		if err != nil {
-			log.Err(err).Msg("Failed to clean up Matrix room after following tombstone")
+			if err != nil {
+				log.Warn().Err(err).Msg("Failed to set service members in new room")
+			}
 		}
 	}()
-	return EventHandlingResultSuccess
+	if params.TombstoneOldRoom && oldRoom != "" {
+		_, err = portal.Bridge.Bot.SendState(ctx, portal.MXID, event.StateTombstone, "", &event.Content{
+			Parsed: &event.TombstoneEventContent{
+				Body:            "Room has been replaced.",
+				ReplacementRoom: newRoomID,
+			},
+		}, time.Now())
+		if err != nil {
+			log.Err(err).Msg("Failed to send tombstone event to old room")
+		}
+	}
+	if params.DeleteOldRoom && oldRoom != "" {
+		go func() {
+			err = portal.Bridge.Bot.DeleteRoom(ctx, oldRoom, true)
+			if err != nil {
+				log.Err(err).Msg("Failed to clean up old Matrix room after updating portal MXID")
+			}
+		}()
+	}
+	return nil
 }
 
 func (portal *Portal) updateInfoAfterTombstone(ctx context.Context, senderUser *User) {
@@ -2282,6 +2372,7 @@ func (portal *Portal) sendConvertedMessage(
 	allSuccess := true
 	for i, part := range converted.Parts {
 		portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
+		part.Content.BeeperDisappearingTimer = converted.Disappear.ToEventContent()
 		dbMessage := &database.Message{
 			ID:               id,
 			PartID:           part.ID,
@@ -2326,8 +2417,8 @@ func (portal *Portal) sendConvertedMessage(
 			logContext(log.Err(err)).Str("part_id", string(part.ID)).Msg("Failed to save message part to database")
 			allSuccess = false
 		}
-		if converted.Disappear.Type != database.DisappearingTypeNone && !dbMessage.HasFakeMXID() {
-			if converted.Disappear.Type == database.DisappearingTypeAfterSend && converted.Disappear.DisappearAt.IsZero() {
+		if converted.Disappear.Type != event.DisappearingTypeNone && !dbMessage.HasFakeMXID() {
+			if converted.Disappear.Type == event.DisappearingTypeAfterSend && converted.Disappear.DisappearAt.IsZero() {
 				converted.Disappear.DisappearAt = dbMessage.Timestamp.Add(converted.Disappear.Timer)
 			}
 			portal.Bridge.DisappearLoop.Add(ctx, &database.DisappearingMessage{
@@ -3653,6 +3744,15 @@ func (portal *Portal) UpdateCapabilities(ctx context.Context, source *UserLogin,
 	portal.CapState = database.CapabilityState{
 		Source: source.ID,
 		ID:     capID,
+		Flags:  portal.CapState.Flags,
+	}
+	if caps.DisappearingTimer != nil && !portal.CapState.Flags.Has(database.CapStateFlagDisappearingTimerSet) {
+		zerolog.Ctx(ctx).Debug().Msg("Disappearing timer capability was added, sending disappearing timer state event")
+		success = portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperDisappearingTimer, "", portal.Disappear.ToEventContent())
+		if !success {
+			return false
+		}
+		portal.CapState.Flags |= database.CapStateFlagDisappearingTimerSet
 	}
 	portal.lastCapUpdate = time.Now()
 	if implicit {
@@ -4041,16 +4141,22 @@ func DisappearingMessageNotice(expiration time.Duration, implicit bool) *event.M
 	return content
 }
 
-func (portal *Portal) UpdateDisappearingSetting(ctx context.Context, setting database.DisappearingSetting, sender MatrixAPI, ts time.Time, implicit, save bool) bool {
-	if setting.Timer == 0 {
-		setting.Type = ""
-	}
+type UpdateDisappearingSettingOpts struct {
+	Sender     MatrixAPI
+	Timestamp  time.Time
+	Implicit   bool
+	Save       bool
+	SendNotice bool
+}
+
+func (portal *Portal) UpdateDisappearingSetting(ctx context.Context, setting database.DisappearingSetting, opts UpdateDisappearingSettingOpts) bool {
+	setting = setting.Normalize()
 	if portal.Disappear.Timer == setting.Timer && portal.Disappear.Type == setting.Type {
 		return false
 	}
 	portal.Disappear.Type = setting.Type
 	portal.Disappear.Timer = setting.Timer
-	if save {
+	if opts.Save {
 		err := portal.Save(ctx)
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to save portal to database after updating disappearing setting")
@@ -4059,19 +4165,36 @@ func (portal *Portal) UpdateDisappearingSetting(ctx context.Context, setting dat
 	if portal.MXID == "" {
 		return true
 	}
-	content := DisappearingMessageNotice(setting.Timer, implicit)
-	if sender == nil {
-		sender = portal.Bridge.Bot
+
+	if opts.Sender == nil {
+		opts.Sender = portal.Bridge.Bot
 	}
-	_, err := sender.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
+	if opts.Timestamp.IsZero() {
+		opts.Timestamp = time.Now()
+	}
+	portal.sendRoomMeta(ctx, opts.Sender, opts.Timestamp, event.StateBeeperDisappearingTimer, "", setting.ToEventContent())
+
+	if !opts.SendNotice {
+		return true
+	}
+	content := DisappearingMessageNotice(setting.Timer, opts.Implicit)
+	_, err := opts.Sender.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
 		Parsed: content,
-	}, &MatrixSendExtra{Timestamp: ts})
+		Raw: map[string]any{
+			"com.beeper.action_message": map[string]any{
+				"type":       "disappearing_timer",
+				"timer":      setting.Timer.Milliseconds(),
+				"timer_type": setting.Type,
+				"implicit":   opts.Implicit,
+			},
+		},
+	}, &MatrixSendExtra{Timestamp: opts.Timestamp})
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to send disappearing messages notice")
 	} else {
 		zerolog.Ctx(ctx).Debug().
 			Dur("new_timer", portal.Disappear.Timer).
-			Bool("implicit", implicit).
+			Bool("implicit", opts.Implicit).
 			Msg("Sent disappearing messages notice")
 	}
 	return true
@@ -4162,7 +4285,13 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 		changed = portal.updateAvatar(ctx, info.Avatar, sender, ts) || changed
 	}
 	if info.Disappear != nil {
-		changed = portal.UpdateDisappearingSetting(ctx, *info.Disappear, sender, ts, false, false) || changed
+		changed = portal.UpdateDisappearingSetting(ctx, *info.Disappear, UpdateDisappearingSettingOpts{
+			Sender:     sender,
+			Timestamp:  ts,
+			Implicit:   false,
+			Save:       false,
+			SendNotice: true,
+		}) || changed
 	}
 	if info.ParentID != nil {
 		changed = portal.updateParent(ctx, *info.ParentID, source) || changed
@@ -4346,6 +4475,13 @@ func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLo
 		Type:     event.StateBeeperRoomFeatures,
 		Content:  event.Content{Parsed: roomFeatures},
 	})
+	if roomFeatures.DisappearingTimer != nil {
+		req.InitialState = append(req.InitialState, &event.Event{
+			Type:    event.StateBeeperDisappearingTimer,
+			Content: event.Content{Parsed: portal.Disappear.ToEventContent()},
+		})
+		portal.CapState.Flags |= database.CapStateFlagDisappearingTimerSet
+	}
 	if req.Topic == "" {
 		// Add explicit topic event if topic is empty to ensure the event is set.
 		// This ensures that there won't be an extra event later if PUT /state/... is called.

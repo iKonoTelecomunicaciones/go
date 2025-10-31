@@ -10,7 +10,7 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
 )
 
-func init() {
+func Register() {
 	// Inbound Session
 	olm.InitInboundGroupSessionFromPickled = func(pickled, key []byte) (olm.InboundGroupSession, error) {
 		if len(pickled) == 0 {

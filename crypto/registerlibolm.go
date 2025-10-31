@@ -2,4 +2,8 @@
 
 package crypto
 
-import _ "github.com/iKonoTelecomunicaciones/go/crypto/libolm"
+import "github.com/iKonoTelecomunicaciones/go/crypto/libolm"
+
+func init() {
+	libolm.Register()
+}

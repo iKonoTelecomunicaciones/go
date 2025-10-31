@@ -8,7 +8,7 @@ package pk
 
 import "github.com/iKonoTelecomunicaciones/go/crypto/olm"
 
-func init() {
+func Register() {
 	olm.InitNewPKSigningFromSeed = func(seed []byte) (olm.PKSigning, error) {
 		return NewSigningFromSeed(seed)
 	}
