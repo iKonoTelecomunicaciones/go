@@ -3216,6 +3216,10 @@ func (portal *Portal) handleRemoteReactionRemove(ctx context.Context, source *Us
 
 func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *UserLogin, evt RemoteMessageRemove) EventHandlingResult {
 	log := zerolog.Ctx(ctx)
+	if !portal.Bridge.Config.DeleteMessages {
+		log.Info().Msg("Ignoring remote message remove event because delete messages are disabled")
+		return EventHandlingResultIgnored
+	}
 	targetParts, err := portal.Bridge.DB.Message.GetAllPartsByID(ctx, portal.Receiver, evt.GetTargetMessage())
 	if err != nil {
 		log.Err(err).Msg("Failed to get target message for removal")
@@ -3927,6 +3931,12 @@ func (portal *Portal) sendStateWithIntentOrBot(ctx context.Context, sender Matri
 	if sender == nil {
 		sender = portal.Bridge.Bot
 	}
+
+	if !portal.Bridge.Config.RenameRoom && eventType == event.StateRoomName {
+		zerolog.Ctx(ctx).Info().Msg("Ignoring room name change event")
+		return
+	}
+
 	resp, err = sender.SendState(ctx, portal.MXID, eventType, stateKey, content, ts)
 	if errors.Is(err, mautrix.MForbidden) && sender != portal.Bridge.Bot {
 		if content.Raw == nil {
