@@ -16,7 +16,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 func (pdu *PDU) CalculateContentHash() ([32]byte, error) {
@@ -72,7 +72,12 @@ func (pdu *PDU) GetRoomID() (id.RoomID, error) {
 	}
 }
 
+var UseInternalMetaForGetEventID = false
+
 func (pdu *PDU) GetEventID(roomVersion id.RoomVersion) (id.EventID, error) {
+	if UseInternalMetaForGetEventID && pdu.InternalMeta.EventID != "" {
+		return pdu.InternalMeta.EventID, nil
+	}
 	return pdu.calculateEventID(roomVersion, '$')
 }
 

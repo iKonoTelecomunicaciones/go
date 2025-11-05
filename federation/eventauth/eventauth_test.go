@@ -23,9 +23,9 @@ import (
 	"go.mau.fi/util/exerrors"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/federation/eventauth"
-	"maunium.net/go/mautrix/federation/pdu"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/federation/eventauth"
+	"github.com/iKonoTelecomunicaciones/go/federation/pdu"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 //go:embed *.jsonl

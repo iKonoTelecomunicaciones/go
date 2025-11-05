@@ -14,8 +14,8 @@ import (
 	"github.com/tidwall/gjson"
 	"go.mau.fi/util/exgjson"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type StateKey struct {

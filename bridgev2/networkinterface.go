@@ -346,6 +346,10 @@ type NetworkGeneralCapabilities struct {
 	// Should the bridge re-request user info on incoming messages even if the ghost already has info?
 	// By default, info is only requested for ghosts with no name, and other updating is left to events.
 	AggressiveUpdateInfo bool
+	// Should the bridge call HandleMatrixReadReceipt with fake data when receiving a new message?
+	// This should be enabled if the network requires each message to be marked as read independently,
+	// and doesn't automatically do it when sending a message.
+	ImplicitReadReceipts bool
 	// If the bridge uses the pending message mechanism ([MatrixMessage.AddPendingToSave])
 	// to handle asynchronous message responses, this field can be set to enable
 	// automatic timeout errors in case the asynchronous response never arrives.
@@ -693,6 +697,14 @@ type DisappearTimerChangingNetworkAPI interface {
 	HandleMatrixDisappearingTimer(ctx context.Context, msg *MatrixDisappearingTimer) (bool, error)
 }
 
+// DeleteChatHandlingNetworkAPI is an optional interface that network connectors
+// can implement to delete a chat from the remote network.
+type DeleteChatHandlingNetworkAPI interface {
+	NetworkAPI
+	// HandleMatrixDeleteChat is called when the user explicitly deletes a chat.
+	HandleMatrixDeleteChat(ctx context.Context, msg *MatrixDeleteChat) error
+}
+
 type ResolveIdentifierResponse struct {
 	// Ghost is the ghost of the user that the identifier resolves to.
 	// This field should be set whenever possible. However, it is not required,
@@ -803,19 +815,19 @@ type GroupFieldCapability struct {
 }
 
 type GroupCreateParams struct {
-	Type string `json:"type"`
+	Type string `json:"type,omitempty"`
 
-	Username     string               `json:"username"`
-	Participants []networkid.UserID   `json:"participants"`
-	Parent       *networkid.PortalKey `json:"parent"`
+	Username     string               `json:"username,omitempty"`
+	Participants []networkid.UserID   `json:"participants,omitempty"`
+	Parent       *networkid.PortalKey `json:"parent,omitempty"`
 
-	Name      *event.RoomNameEventContent    `json:"name"`
-	Avatar    *event.RoomAvatarEventContent  `json:"avatar"`
-	Topic     *event.TopicEventContent       `json:"topic"`
-	Disappear *event.BeeperDisappearingTimer `json:"disappear"`
+	Name      *event.RoomNameEventContent    `json:"name,omitempty"`
+	Avatar    *event.RoomAvatarEventContent  `json:"avatar,omitempty"`
+	Topic     *event.TopicEventContent       `json:"topic,omitempty"`
+	Disappear *event.BeeperDisappearingTimer `json:"disappear,omitempty"`
 
 	// An existing room ID to bridge to. If unset, a new room will be created.
-	RoomID id.RoomID `json:"room_id"`
+	RoomID id.RoomID `json:"room_id,omitempty"`
 }
 
 type GroupCreatingNetworkAPI interface {
@@ -1361,6 +1373,8 @@ type MatrixReadReceipt struct {
 	LastRead time.Time
 	// The receipt metadata.
 	Receipt event.ReadReceipt
+	// Whether the receipt is implicit, i.e. triggered by an incoming timeline event rather than an explicit receipt.
+	Implicit bool
 }
 
 type MatrixTyping struct {
@@ -1374,6 +1388,7 @@ type MatrixViewingChat struct {
 	Portal *Portal
 }
 
+type MatrixDeleteChat = MatrixEventBase[*event.BeeperChatDeleteEventContent]
 type MatrixMarkedUnread = MatrixRoomMeta[*event.MarkedUnreadEventContent]
 type MatrixMute = MatrixRoomMeta[*event.BeeperMuteEventContent]
 type MatrixRoomTag = MatrixRoomMeta[*event.TagEventContent]
