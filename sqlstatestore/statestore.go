@@ -135,7 +135,7 @@ func (store *SQLStateStore) GetMember(ctx context.Context, roomID id.RoomID, use
 func (store *SQLStateStore) TryGetMember(ctx context.Context, roomID id.RoomID, userID id.UserID) (*event.MemberEventContent, error) {
 	var member event.MemberEventContent
 	err := store.
-		QueryRow(ctx, "SELECT membership, displayname, avatar_url FROM mx_user_profile WHERE room_id=$1 AND user_id=$2", roomID, userID).
+		QueryRow(ctx, "SELECT membership, displayname, avatar_url FROM mx_user_profile WHERE user_id=$1", userID).
 		Scan(&member.Membership, &member.Displayname, &member.AvatarURL)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
