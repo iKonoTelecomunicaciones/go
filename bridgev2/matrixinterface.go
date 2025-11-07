@@ -48,6 +48,7 @@ type MatrixConnector interface {
 	GetPowerLevels(ctx context.Context, roomID id.RoomID) (*event.PowerLevelsEventContent, error)
 	GetMembers(ctx context.Context, roomID id.RoomID) (map[id.UserID]*event.MemberEventContent, error)
 	GetMemberInfo(ctx context.Context, roomID id.RoomID, userID id.UserID) (*event.MemberEventContent, error)
+	GetDisplayname(ctx context.Context, userID id.UserID) string
 
 	BatchSend(ctx context.Context, roomID id.RoomID, req *mautrix.ReqBeeperBatchSend, extras []*MatrixSendExtra) (*mautrix.RespBeeperBatchSend, error)
 	GenerateDeterministicRoomID(portalKey networkid.PortalKey) id.RoomID

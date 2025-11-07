@@ -132,6 +132,31 @@ func (store *SQLStateStore) GetMember(ctx context.Context, roomID id.RoomID, use
 	return member, err
 }
 
+func (store *SQLStateStore) GetDisplayname(ctx context.Context, userID id.UserID) string {
+	displayName := store.TryGetDisplayname(ctx, userID)
+
+	if displayName == "" {
+		return userID.String()
+	}
+
+	return displayName
+}
+
+func (store *SQLStateStore) TryGetDisplayname(ctx context.Context, userID id.UserID) string {
+	var displayname string
+	err := store.
+		QueryRow(ctx, "SELECT displayname FROM mx_user_profile WHERE user_id=$1 AND membership = 'join'", userID).
+		Scan(&displayname)
+	if errors.Is(err, sql.ErrNoRows) {
+		zerolog.Ctx(ctx).Err(err).Msgf("Failed to get display name for user %s", userID)
+		return ""
+	} else if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msgf("Failed to get display name for user %s", userID)
+		return ""
+	}
+	return displayname
+}
+
 func (store *SQLStateStore) TryGetMember(ctx context.Context, roomID id.RoomID, userID id.UserID) (*event.MemberEventContent, error) {
 	var member event.MemberEventContent
 	err := store.

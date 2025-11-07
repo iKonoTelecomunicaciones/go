@@ -634,6 +634,7 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 			origSender.MemberEventContent = *memberInfo
 			if memberInfo.Displayname == "" {
 				origSender.DisambiguatedName = sender.MXID.String()
+				origSender.Displayname = portal.Bridge.Matrix.GetDisplayname(ctx, sender.MXID)
 			} else if origSender.RequiresDisambiguation = portal.checkConfusableName(ctx, sender.MXID, memberInfo.Displayname); origSender.RequiresDisambiguation {
 				origSender.DisambiguatedName = fmt.Sprintf("%s (%s)", memberInfo.Displayname, sender.MXID)
 			} else {
