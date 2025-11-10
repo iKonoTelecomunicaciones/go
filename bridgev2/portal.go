@@ -2319,7 +2319,8 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 	case RemoteEventChatResync:
 		res = portal.handleRemoteChatResync(ctx, source, evt.(RemoteChatResync))
 	case RemoteEventChatDelete:
-		res = portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
+		log.Info().Msg("Ignoring remote chat delete event...")
+		//portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
 	case RemoteEventBackfill:
 		res = portal.handleRemoteBackfill(ctx, source, evt.(RemoteBackfill))
 	default:
@@ -4575,6 +4576,27 @@ func (portal *Portal) UpdateDisappearingSetting(
 			Msg("Sent disappearing messages notice")
 	}
 	return true
+}
+
+func (br *Bridge) UpdateSetRelayFromUser(
+	ctx context.Context, loginID string,
+) error {
+	if loginID == "" {
+		return fmt.Errorf("userLoginID is empty")
+	}
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	err := br.DB.Portal.UpdateSetRelayFromUser(ctx, loginID)
+
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update relay login ID from user")
+	} else {
+		zerolog.Ctx(ctx).Info().Str(
+			"user_login_id", loginID,
+		).Msg("Updated relay login ID from user, cleared portal cache")
+	}
+
+	return err
 }
 
 func (portal *Portal) updateParent(ctx context.Context, newParentID networkid.PortalID, source *UserLogin) bool {
