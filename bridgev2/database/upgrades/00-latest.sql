@@ -1,4 +1,4 @@
--- v0 -> v22 (compatible with v9+): Latest revision
+-- v0 -> v23 (compatible with v9+): Latest revision
 CREATE TABLE "user" (
 	bridge_id       TEXT NOT NULL,
 	mxid            TEXT NOT NULL,
@@ -127,6 +127,7 @@ CREATE TABLE disappearing_message (
 	bridge_id    TEXT   NOT NULL,
 	mx_room      TEXT   NOT NULL,
 	mxid         TEXT   NOT NULL,
+	timestamp    BIGINT NOT NULL DEFAULT 0,
 	type         TEXT   NOT NULL,
 	timer        BIGINT NOT NULL,
 	disappear_at BIGINT,
@@ -214,4 +215,15 @@ CREATE TABLE kv_store (
 	value     TEXT NOT NULL,
 
 	PRIMARY KEY (bridge_id, key)
+);
+
+CREATE TABLE public_media (
+	bridge_id TEXT   NOT NULL,
+	public_id TEXT   NOT NULL,
+	mxc       TEXT   NOT NULL,
+	keys      jsonb,
+	mimetype  TEXT,
+	expiry    BIGINT,
+
+	PRIMARY KEY (bridge_id, public_id)
 );

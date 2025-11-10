@@ -70,6 +70,15 @@ func fnLogin(ce *Event) {
 		}
 		ce.Args = ce.Args[1:]
 	}
+	if reauth == nil && ce.User.HasTooManyLogins() {
+		ce.Reply(
+			"You have reached the maximum number of logins (%d). "+
+				"Please logout from an existing login before creating a new one. "+
+				"If you want to re-authenticate an existing login, use the `$cmdprefix relogin` command.",
+			ce.User.Permissions.MaxLogins,
+		)
+		return
+	}
 	flows := ce.Bridge.Network.GetLoginFlows()
 	var chosenFlowID string
 	if len(ce.Args) > 0 {
@@ -190,11 +199,14 @@ type userInputLoginCommandState struct {
 
 func (uilcs *userInputLoginCommandState) promptNext(ce *Event) {
 	field := uilcs.RemainingFields[0]
+	parts := []string{fmt.Sprintf("Please enter your %s", field.Name)}
 	if field.Description != "" {
-		ce.Reply("Please enter your %s\n%s", field.Name, field.Description)
-	} else {
-		ce.Reply("Please enter your %s", field.Name)
+		parts = append(parts, field.Description)
 	}
+	if len(field.Options) > 0 {
+		parts = append(parts, fmt.Sprintf("Options: `%s`", strings.Join(field.Options, "`, `")))
+	}
+	ce.Reply(strings.Join(parts, "\n"))
 	StoreCommandState(ce.User, &CommandState{
 		Next:   MinimalCommandHandlerFunc(uilcs.submitNext),
 		Action: "Login",

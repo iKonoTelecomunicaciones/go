@@ -87,6 +87,7 @@ type Portal struct {
 	lastCapUpdate time.Time
 
 	roomCreateLock sync.Mutex
+	RoomCreated    *exsync.Event
 
 	functionalMembersLock  sync.Mutex
 	functionalMembersCache *event.ElementFunctionalMembersContent
@@ -124,6 +125,11 @@ func (br *Bridge) loadPortal(ctx context.Context, dbPortal *database.Portal, que
 		currentlyTypingLogins: make(map[id.UserID]*UserLogin),
 		currentlyTypingGhosts: exsync.NewSet[id.UserID](),
 		outgoingMessages:      make(map[networkid.TransactionID]*outgoingMessage),
+
+		RoomCreated: exsync.NewEvent(),
+	}
+	if portal.MXID != "" {
+		portal.RoomCreated.Set()
 	}
 	// Putting the portal in the cache before it's fully initialized is mildly dangerous,
 	// but loading the relay user login may depend on it.
@@ -183,6 +189,16 @@ func (br *Bridge) loadManyPortals(ctx context.Context, portals []*database.Porta
 		}
 	}
 	return output, nil
+}
+
+func (br *Bridge) loadPortalWithCacheCheck(ctx context.Context, dbPortal *database.Portal) (*Portal, error) {
+	if dbPortal == nil {
+		return nil, nil
+	} else if cached, ok := br.portalsByKey[dbPortal.PortalKey]; ok {
+		return cached, nil
+	} else {
+		return br.loadPortal(ctx, dbPortal, nil, nil)
+	}
 }
 
 func (br *Bridge) UnlockedGetPortalByKey(ctx context.Context, key networkid.PortalKey, onlyIfExists bool) (*Portal, error) {
@@ -272,6 +288,26 @@ func (br *Bridge) GetDMPortalsWith(ctx context.Context, otherUserID networkid.Us
 		return nil, err
 	}
 	return br.loadManyPortals(ctx, rows)
+}
+
+func (br *Bridge) GetChildPortals(ctx context.Context, parent networkid.PortalKey) ([]*Portal, error) {
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	rows, err := br.DB.Portal.GetChildren(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	return br.loadManyPortals(ctx, rows)
+}
+
+func (br *Bridge) GetDMPortal(ctx context.Context, receiver networkid.UserLoginID, otherUserID networkid.UserID) (*Portal, error) {
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	dbPortal, err := br.DB.Portal.GetDM(ctx, receiver, otherUserID)
+	if err != nil {
+		return nil, err
+	}
+	return br.loadPortalWithCacheCheck(ctx, dbPortal)
 }
 
 func (br *Bridge) GetPortalByKey(ctx context.Context, key networkid.PortalKey) (*Portal, error) {
@@ -483,6 +519,9 @@ func (portal *Portal) handleSingleEvent(ctx context.Context, rawEvt any, doneCal
 			} else {
 				portal.sendSuccessStatus(ctx, evt.evt, 0, "")
 			}
+		}
+		if res.Error != nil && evt.evt.StateKey != nil {
+			portal.revertRoomMeta(ctx, evt.evt)
 		}
 	case *portalRemoteEvent:
 		res = portal.handleRemoteEvent(ctx, evt.source, evt.evtType, evt.evt)
@@ -816,7 +855,7 @@ func (portal *Portal) callReadReceiptHandler(
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to save user portal metadata")
 	}
-	portal.Bridge.DisappearLoop.StartAll(ctx, portal.MXID)
+	portal.Bridge.DisappearLoop.StartAllBefore(ctx, portal.MXID, evt.ReadUpTo)
 }
 
 func (portal *Portal) handleMatrixTyping(ctx context.Context, evt *event.Event) EventHandlingResult {
@@ -948,6 +987,9 @@ func (portal *Portal) checkMessageContentCaps(caps *event.RoomFeatures, content 
 		if content.Info != nil {
 			dur := time.Duration(content.Info.Duration) * time.Millisecond
 			if feat.MaxDuration != nil && dur > feat.MaxDuration.Duration {
+				if capMsgType == event.CapMsgVoice {
+					return fmt.Errorf("%w: %s supports voice messages up to %s long", ErrVoiceMessageDurationTooLong, portal.Bridge.Network.GetName().DisplayName, exfmt.Duration(feat.MaxDuration.Duration))
+				}
 				return fmt.Errorf("%w: %s is longer than the maximum of %s", ErrMediaDurationTooLong, exfmt.Duration(dur), exfmt.Duration(feat.MaxDuration.Duration))
 			}
 			if feat.MaxSize != 0 && int64(content.Info.Size) > feat.MaxSize {
@@ -1084,6 +1126,16 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 			}
 		}
 	}
+	var messageTimer *event.BeeperDisappearingTimer
+	if msgContent != nil {
+		messageTimer = msgContent.BeeperDisappearingTimer
+	}
+	if messageTimer != nil && *portal.Disappear.ToEventContent() != *messageTimer {
+		log.Warn().
+			Any("event_timer", messageTimer).
+			Any("portal_timer", portal.Disappear.ToEventContent()).
+			Msg("Mismatching disappearing timer in event")
+	}
 
 	wrappedMsgEvt := &MatrixMessage{
 		MatrixEventBase: MatrixEventBase[*event.MessageEventContent]{
@@ -1160,18 +1212,23 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 		}
 		portal.sendSuccessStatus(ctx, evt, resp.StreamOrder, message.MXID)
 	}
-	if portal.Disappear.Type != event.DisappearingTypeNone {
+	ds := portal.Disappear
+	if messageTimer != nil {
+		ds = database.DisappearingSettingFromEvent(messageTimer)
+	}
+	if ds.Type != event.DisappearingTypeNone {
 		go portal.Bridge.DisappearLoop.Add(ctx, &database.DisappearingMessage{
 			RoomID:              portal.MXID,
 			EventID:             message.MXID,
-			DisappearingSetting: portal.Disappear.StartingAt(message.Timestamp),
+			Timestamp:           message.Timestamp,
+			DisappearingSetting: ds.StartingAt(message.Timestamp),
 		})
 	}
 	if resp.Pending {
 		// Not exactly queued, but not finished either
 		return EventHandlingResultQueued
 	}
-	return EventHandlingResultSuccess
+	return EventHandlingResultSuccess.WithEventID(message.MXID).WithStreamOrder(resp.StreamOrder)
 }
 
 // AddPendingToIgnore adds a transaction ID that should be ignored if encountered as a new message.
@@ -1413,7 +1470,7 @@ func (portal *Portal) handleMatrixReaction(ctx context.Context, sender *UserLogi
 		if existing.EmojiID != "" || existing.Emoji == preResp.Emoji {
 			log.Debug().Msg("Ignoring duplicate reaction")
 			portal.sendSuccessStatus(ctx, evt, 0, deterministicID)
-			return EventHandlingResultIgnored
+			return EventHandlingResultIgnored.WithEventID(deterministicID)
 		}
 		react.ReactionToOverride = existing
 		_, err = portal.Bridge.Bot.SendMessage(ctx, portal.MXID, event.EventRedaction, &event.Content{
@@ -1495,7 +1552,7 @@ func (portal *Portal) handleMatrixReaction(ctx context.Context, sender *UserLogi
 		log.Err(err).Msg("Failed to save reaction to database")
 	}
 	portal.sendSuccessStatus(ctx, evt, 0, deterministicID)
-	return EventHandlingResultSuccess
+	return EventHandlingResultSuccess.WithEventID(deterministicID)
 }
 
 func handleMatrixRoomMeta[APIType any, ContentType any](
@@ -1509,9 +1566,13 @@ func handleMatrixRoomMeta[APIType any, ContentType any](
 	if evt.StateKey == nil || *evt.StateKey != "" {
 		return EventHandlingResultFailed.WithMSSError(ErrInvalidStateKey)
 	}
+	//caps := sender.Client.GetCapabilities(ctx, portal)
+	//if stateCap, ok := caps.State[evt.Type.Type]; !ok || stateCap.Level <= event.CapLevelUnsupported {
+	//	return EventHandlingResultIgnored.WithMSSError(fmt.Errorf("%s %w", evt.Type.Type, ErrRoomMetadataNotAllowed))
+	//}
 	api, ok := sender.Client.(APIType)
 	if !ok {
-		return EventHandlingResultIgnored.WithMSSError(ErrRoomMetadataNotSupported)
+		return EventHandlingResultIgnored.WithMSSError(fmt.Errorf("%w of type %s", ErrRoomMetadataNotSupported, evt.Type))
 	}
 	log := zerolog.Ctx(ctx)
 	content, ok := evt.Content.Parsed.(ContentType)
@@ -1545,7 +1606,6 @@ func handleMatrixRoomMeta[APIType any, ContentType any](
 			return EventHandlingResultIgnored
 		}
 		if !sender.Client.GetCapabilities(ctx, portal).DisappearingTimer.Supports(typedContent) {
-			portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperDisappearingTimer, "", portal.Disappear.ToEventContent(), false)
 			return EventHandlingResultFailed.WithMSSError(ErrDisappearingTimerUnsupported)
 		}
 	}
@@ -1568,9 +1628,6 @@ func handleMatrixRoomMeta[APIType any, ContentType any](
 	})
 	if err != nil {
 		log.Err(err).Msg("Failed to handle Matrix room metadata")
-		if evt.Type == event.StateBeeperDisappearingTimer {
-			portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperDisappearingTimer, "", portal.Disappear.ToEventContent(), false)
-		}
 		return EventHandlingResultFailed.WithMSSError(err)
 	}
 	if changed {
@@ -2010,6 +2067,7 @@ func (portal *Portal) UpdateMatrixRoomID(
 	} else if alreadyExists {
 		log.Debug().Msg("Replacement room is already a portal, overwriting")
 		existingPortal.MXID = ""
+		existingPortal.RoomCreated.Clear()
 		err := existingPortal.Save(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to clear mxid of existing portal: %w", err)
@@ -2017,6 +2075,7 @@ func (portal *Portal) UpdateMatrixRoomID(
 		delete(portal.Bridge.portalsByMXID, portal.MXID)
 	}
 	portal.MXID = newRoomID
+	portal.RoomCreated.Set()
 	portal.Bridge.portalsByMXID[portal.MXID] = portal
 	portal.NameSet = false
 	portal.AvatarSet = false
@@ -2260,7 +2319,8 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 	case RemoteEventChatResync:
 		res = portal.handleRemoteChatResync(ctx, source, evt.(RemoteChatResync))
 	case RemoteEventChatDelete:
-		res = portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
+		log.Info().Msg("Ignoring remote chat delete event...")
+		//portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
 	case RemoteEventBackfill:
 		res = portal.handleRemoteBackfill(ctx, source, evt.(RemoteBackfill))
 	default:
@@ -2559,6 +2619,7 @@ func (portal *Portal) sendConvertedMessage(
 			portal.Bridge.DisappearLoop.Add(ctx, &database.DisappearingMessage{
 				RoomID:              portal.MXID,
 				EventID:             dbMessage.MXID,
+				Timestamp:           dbMessage.Timestamp,
 				DisappearingSetting: converted.Disappear,
 			})
 		}
@@ -3349,11 +3410,15 @@ func (portal *Portal) handleRemoteReadReceipt(ctx context.Context, source *UserL
 			return evt.Int64("target_stream_order", targetStreamOrder)
 		}
 		err = soIntent.MarkStreamOrderRead(ctx, portal.MXID, targetStreamOrder, getEventTS(evt))
+		if readUpTo.IsZero() {
+			readUpTo = getEventTS(evt)
+		}
 	} else {
 		addTargetLog = func(evt *zerolog.Event) *zerolog.Event {
 			return evt.Stringer("target_mxid", lastTarget.MXID)
 		}
 		err = intent.MarkRead(ctx, portal.MXID, lastTarget.MXID, getEventTS(evt))
+		readUpTo = lastTarget.Timestamp
 	}
 	if err != nil {
 		addTargetLog(log.Err(err)).Msg("Failed to bridge read receipt")
@@ -3362,7 +3427,7 @@ func (portal *Portal) handleRemoteReadReceipt(ctx context.Context, source *UserL
 		addTargetLog(log.Debug()).Msg("Bridged read receipt")
 	}
 	if sender.IsFromMe {
-		portal.Bridge.DisappearLoop.StartAll(ctx, portal.MXID)
+		portal.Bridge.DisappearLoop.StartAllBefore(ctx, portal.MXID, readUpTo)
 	}
 	return EventHandlingResultSuccess
 }
@@ -3499,6 +3564,20 @@ func (portal *Portal) findOtherLogins(ctx context.Context, source *UserLogin) (o
 	return
 }
 
+type childDeleteProxy struct {
+	RemoteChatDeleteWithChildren
+	child networkid.PortalKey
+	done  func()
+}
+
+func (cdp *childDeleteProxy) AddLogContext(c zerolog.Context) zerolog.Context {
+	return cdp.RemoteChatDeleteWithChildren.AddLogContext(c).Str("subaction", "delete children")
+}
+func (cdp *childDeleteProxy) GetPortalKey() networkid.PortalKey              { return cdp.child }
+func (cdp *childDeleteProxy) ShouldCreatePortal() bool                       { return false }
+func (cdp *childDeleteProxy) PreHandle(ctx context.Context, portal *Portal)  {}
+func (cdp *childDeleteProxy) PostHandle(ctx context.Context, portal *Portal) { cdp.done() }
+
 func (portal *Portal) handleRemoteChatDelete(ctx context.Context, source *UserLogin, evt RemoteChatDelete) EventHandlingResult {
 	log := zerolog.Ctx(ctx)
 	if portal.Receiver == "" && evt.DeleteOnlyForMe() {
@@ -3533,6 +3612,31 @@ func (portal *Portal) handleRemoteChatDelete(ctx context.Context, source *UserLo
 				return EventHandlingResultSuccess
 			}
 		}
+	}
+	if childDeleter, ok := evt.(RemoteChatDeleteWithChildren); ok && childDeleter.DeleteChildren() && portal.RoomType == database.RoomTypeSpace {
+		children, err := portal.Bridge.GetChildPortals(ctx, portal.PortalKey)
+		if err != nil {
+			log.Err(err).Msg("Failed to fetch children to delete")
+			return EventHandlingResultFailed.WithError(err)
+		}
+		log.Debug().
+			Int("portal_count", len(children)).
+			Msg("Deleting child portals before remote chat delete")
+		var wg sync.WaitGroup
+		wg.Add(len(children))
+		for _, child := range children {
+			child.queueEvent(ctx, &portalRemoteEvent{
+				evt: &childDeleteProxy{
+					RemoteChatDeleteWithChildren: childDeleter,
+					child:                        child.PortalKey,
+					done:                         wg.Done,
+				},
+				source:  source,
+				evtType: RemoteEventChatDelete,
+			})
+		}
+		wg.Wait()
+		log.Debug().Msg("Finished deleting child portals")
 	}
 	err := portal.Delete(ctx)
 	if err != nil {
@@ -3589,12 +3693,43 @@ type PortalInfo = ChatInfo
 type ChatMember struct {
 	EventSender
 	Membership event.Membership
-	Nickname   *string
+	// Per-room nickname for the user. Not yet used.
+	Nickname *string
+	// The power level to set for the user when syncing power levels.
 	PowerLevel *int
-	UserInfo   *UserInfo
-
+	// Optional user info to sync the ghost user while updating membership.
+	UserInfo *UserInfo
+	// The user who sent the membership change (user who invited/kicked/banned this user).
+	// Not yet used. Not applicable if Membership is join or knock.
+	MemberSender EventSender
+	// Extra fields to include in the member event.
 	MemberEventExtra map[string]any
-	PrevMembership   event.Membership
+	// The expected previous membership. If this doesn't match, the change is ignored.
+	PrevMembership event.Membership
+}
+
+type ChatMemberMap map[networkid.UserID]ChatMember
+
+// Set adds the given entry to this map, overwriting any existing entry with the same Sender field.
+func (cmm ChatMemberMap) Set(member ChatMember) ChatMemberMap {
+	if member.Sender == "" && member.SenderLogin == "" && !member.IsFromMe {
+		return cmm
+	}
+	cmm[member.Sender] = member
+	return cmm
+}
+
+// Add adds the given entry to this map, but will ignore it if an entry with the same Sender field already exists.
+// It returns true if the entry was added, false otherwise.
+func (cmm ChatMemberMap) Add(member ChatMember) bool {
+	if member.Sender == "" && member.SenderLogin == "" && !member.IsFromMe {
+		return false
+	}
+	if _, exists := cmm[member.Sender]; exists {
+		return false
+	}
+	cmm[member.Sender] = member
+	return true
 }
 
 type ChatMemberList struct {
@@ -3618,7 +3753,7 @@ type ChatMemberList struct {
 
 	// Deprecated: Use MemberMap instead to avoid duplicate entries
 	Members     []ChatMember
-	MemberMap   map[networkid.UserID]ChatMember
+	MemberMap   ChatMemberMap
 	PowerLevels *PowerLevelOverrides
 }
 
@@ -3766,7 +3901,7 @@ func (portal *Portal) updateName(
 	}
 	portal.Name = name
 	portal.NameSet = portal.sendRoomMeta(
-		ctx, sender, ts, event.StateRoomName, "", &event.RoomNameEventContent{Name: name}, excludeFromTimeline,
+		ctx, sender, ts, event.StateRoomName, "", &event.RoomNameEventContent{Name: name}, excludeFromTimeline, nil,
 	)
 	return true
 }
@@ -3779,7 +3914,7 @@ func (portal *Portal) updateTopic(
 	}
 	portal.Topic = topic
 	portal.TopicSet = portal.sendRoomMeta(
-		ctx, sender, ts, event.StateTopic, "", &event.TopicEventContent{Topic: topic}, excludeFromTimeline,
+		ctx, sender, ts, event.StateTopic, "", &event.TopicEventContent{Topic: topic}, excludeFromTimeline, nil,
 	)
 	return true
 }
@@ -3810,7 +3945,7 @@ func (portal *Portal) updateAvatar(
 		portal.AvatarHash = newHash
 	}
 	portal.AvatarSet = portal.sendRoomMeta(
-		ctx, sender, ts, event.StateRoomAvatar, "", &event.RoomAvatarEventContent{URL: portal.AvatarMXC}, excludeFromTimeline,
+		ctx, sender, ts, event.StateRoomAvatar, "", &event.RoomAvatarEventContent{URL: portal.AvatarMXC}, excludeFromTimeline, nil,
 	)
 	return true
 }
@@ -3855,6 +3990,7 @@ func (portal *Portal) getBridgeInfo() (string, event.BridgeEventContent) {
 	}
 	if bridgeInfo.Protocol.ID == "slackgo" {
 		bridgeInfo.TempSlackRemoteIDMigratedFlag = true
+		bridgeInfo.TempSlackRemoteIDMigratedFlag2 = true
 	}
 	parent := portal.GetTopLevelParent()
 	if parent != nil {
@@ -3877,8 +4013,8 @@ func (portal *Portal) UpdateBridgeInfo(ctx context.Context) {
 		return
 	}
 	stateKey, bridgeInfo := portal.getBridgeInfo()
-	portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBridge, stateKey, &bridgeInfo, false)
-	portal.sendRoomMeta(ctx, nil, time.Now(), event.StateHalfShotBridge, stateKey, &bridgeInfo, false)
+	portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBridge, stateKey, &bridgeInfo, false, nil)
+	portal.sendRoomMeta(ctx, nil, time.Now(), event.StateHalfShotBridge, stateKey, &bridgeInfo, false, nil)
 }
 
 func (portal *Portal) UpdateCapabilities(ctx context.Context, source *UserLogin, implicit bool) bool {
@@ -3900,7 +4036,7 @@ func (portal *Portal) UpdateCapabilities(ctx context.Context, source *UserLogin,
 		Str("old_id", portal.CapState.ID).
 		Str("new_id", capID).
 		Msg("Sending new room capability event")
-	success := portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperRoomFeatures, portal.getBridgeInfoStateKey(), caps, false)
+	success := portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperRoomFeatures, portal.getBridgeInfoStateKey(), caps, false, nil)
 	if !success {
 		return false
 	}
@@ -3911,7 +4047,7 @@ func (portal *Portal) UpdateCapabilities(ctx context.Context, source *UserLogin,
 	}
 	if caps.DisappearingTimer != nil && !portal.CapState.Flags.Has(database.CapStateFlagDisappearingTimerSet) {
 		zerolog.Ctx(ctx).Debug().Msg("Disappearing timer capability was added, sending disappearing timer state event")
-		success = portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperDisappearingTimer, "", portal.Disappear.ToEventContent(), true)
+		success = portal.sendRoomMeta(ctx, nil, time.Now(), event.StateBeeperDisappearingTimer, "", portal.Disappear.ToEventContent(), true, nil)
 		if !success {
 			return false
 		}
@@ -3956,11 +4092,14 @@ func (portal *Portal) sendRoomMeta(
 	stateKey string,
 	content any,
 	excludeFromTimeline bool,
+	extra map[string]any,
 ) bool {
 	if portal.MXID == "" {
 		return false
 	}
-	extra := make(map[string]any)
+	if extra == nil {
+		extra = make(map[string]any)
+	}
 	if excludeFromTimeline {
 		extra["com.beeper.exclude_from_timeline"] = true
 	}
@@ -3977,7 +4116,53 @@ func (portal *Portal) sendRoomMeta(
 			Msg("Failed to set room metadata")
 		return false
 	}
+	if eventType == event.StateBeeperDisappearingTimer {
+		// TODO remove this debug log at some point
+		zerolog.Ctx(ctx).Debug().
+			Any("content", content).
+			Msg("Sent new disappearing timer event")
+	}
 	return true
+}
+
+func (portal *Portal) revertRoomMeta(ctx context.Context, evt *event.Event) {
+	if !portal.Bridge.Config.RevertFailedStateChanges {
+		return
+	}
+	if evt.GetStateKey() != "" && evt.Type != event.StateMember {
+		return
+	}
+	switch evt.Type {
+	case event.StateRoomName:
+		portal.sendRoomMeta(ctx, nil, time.Time{}, event.StateRoomName, "", &event.RoomNameEventContent{Name: portal.Name}, true, nil)
+	case event.StateRoomAvatar:
+		portal.sendRoomMeta(ctx, nil, time.Time{}, event.StateRoomAvatar, "", &event.RoomAvatarEventContent{URL: portal.AvatarMXC}, true, nil)
+	case event.StateTopic:
+		portal.sendRoomMeta(ctx, nil, time.Time{}, event.StateTopic, "", &event.TopicEventContent{Topic: portal.Topic}, true, nil)
+	case event.StateBeeperDisappearingTimer:
+		portal.sendRoomMeta(ctx, nil, time.Time{}, event.StateBeeperDisappearingTimer, "", portal.Disappear.ToEventContent(), true, nil)
+	case event.StateMember:
+		var prevContent *event.MemberEventContent
+		var extra map[string]any
+		if evt.Unsigned.PrevContent != nil {
+			_ = evt.Unsigned.PrevContent.ParseRaw(evt.Type)
+			prevContent = evt.Unsigned.PrevContent.AsMember()
+			newContent := evt.Content.AsMember()
+			if prevContent.Membership == newContent.Membership {
+				return
+			}
+			extra = evt.Unsigned.PrevContent.Raw
+		} else {
+			prevContent = &event.MemberEventContent{Membership: event.MembershipLeave}
+		}
+		if portal.Bridge.Matrix.GetCapabilities().ArbitraryMemberChange {
+			if extra == nil {
+				extra = make(map[string]any)
+			}
+			extra["com.beeper.member_rollback"] = true
+			portal.sendRoomMeta(ctx, nil, time.Time{}, event.StateMember, evt.GetStateKey(), prevContent, true, extra)
+		}
+	}
 }
 
 func (portal *Portal) getInitialMemberList(ctx context.Context, members *ChatMemberList, source *UserLogin, pl *event.PowerLevelsEventContent) (invite, functional []id.UserID, err error) {
@@ -4364,6 +4549,7 @@ func (portal *Portal) UpdateDisappearingSetting(
 		"",
 		setting.ToEventContent(),
 		opts.ExcludeFromTimeline,
+		nil,
 	)
 
 	if !opts.SendNotice {
@@ -4390,6 +4576,27 @@ func (portal *Portal) UpdateDisappearingSetting(
 			Msg("Sent disappearing messages notice")
 	}
 	return true
+}
+
+func (br *Bridge) UpdateSetRelayFromUser(
+	ctx context.Context, loginID string,
+) error {
+	if loginID == "" {
+		return fmt.Errorf("userLoginID is empty")
+	}
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	err := br.DB.Portal.UpdateSetRelayFromUser(ctx, loginID)
+
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update relay login ID from user")
+	} else {
+		zerolog.Ctx(ctx).Info().Str(
+			"user_login_id", loginID,
+		).Msg("Updated relay login ID from user, cleared portal cache")
+	}
+
+	return err
 }
 
 func (portal *Portal) updateParent(ctx context.Context, newParentID networkid.PortalID, source *UserLogin) bool {
@@ -4492,7 +4699,7 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 	}
 	if info.JoinRule != nil {
 		// TODO change detection instead of spamming this every time?
-		portal.sendRoomMeta(ctx, sender, ts, event.StateJoinRules, "", info.JoinRule, info.ExcludeChangesFromTimeline)
+		portal.sendRoomMeta(ctx, sender, ts, event.StateJoinRules, "", info.JoinRule, info.ExcludeChangesFromTimeline, nil)
 	}
 	if info.Type != nil && portal.RoomType != *info.Type {
 		if portal.MXID != "" && (*info.Type == database.RoomTypeSpace || portal.RoomType == database.RoomTypeSpace) {
@@ -4735,6 +4942,7 @@ func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLo
 	portal.TopicSet = true
 	portal.NameSet = true
 	portal.MXID = roomID
+	portal.RoomCreated.Set()
 	portal.Bridge.cacheLock.Lock()
 	portal.Bridge.portalsByMXID[roomID] = portal
 	portal.Bridge.cacheLock.Unlock()
@@ -4797,7 +5005,7 @@ func (portal *Portal) addToUserSpaces(ctx context.Context) {
 	if portal.Receiver != "" {
 		login := portal.Bridge.GetCachedUserLoginByID(portal.Receiver)
 		if login != nil {
-			up, err := portal.Bridge.DB.UserPortal.Get(ctx, login.UserLogin, portal.PortalKey)
+			up, err := portal.Bridge.DB.UserPortal.GetOrCreate(ctx, login.UserLogin, portal.PortalKey)
 			if err != nil {
 				log.Err(err).Msg("Failed to get user portal to add portal to spaces")
 			} else {
@@ -4838,6 +5046,7 @@ func (portal *Portal) RemoveMXID(ctx context.Context) error {
 		return nil
 	}
 	portal.MXID = ""
+	portal.RoomCreated.Clear()
 	err := portal.Save(ctx)
 	if err != nil {
 		return err
