@@ -30,6 +30,8 @@ type Client struct {
 	ServerName string
 	UserAgent  string
 	Key        *SigningKey
+
+	ResponseSizeLimit int64
 }
 
 func NewClient(serverName string, key *SigningKey, cache ResolutionCache) *Client {
@@ -37,10 +39,16 @@ func NewClient(serverName string, key *SigningKey, cache ResolutionCache) *Clien
 		HTTP: &http.Client{
 			Transport: NewServerResolvingTransport(cache),
 			Timeout:   120 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Federation requests do not allow redirects.
+				return http.ErrUseLastResponse
+			},
 		},
 		UserAgent:  mautrix.DefaultUserAgent,
 		ServerName: serverName,
 		Key:        key,
+
+		ResponseSizeLimit: mautrix.DefaultResponseSizeLimit,
 	}
 }
 
@@ -81,7 +89,7 @@ type RespSendTransaction struct {
 }
 
 func (c *Client) SendTransaction(ctx context.Context, req *ReqSendTransaction) (resp *RespSendTransaction, err error) {
-	err = c.MakeRequest(ctx, req.Destination, true, http.MethodPost, URLPath{"v1", "send", req.TxnID}, req, &resp)
+	err = c.MakeRequest(ctx, req.Destination, true, http.MethodPut, URLPath{"v1", "send", req.TxnID}, req, &resp)
 	return
 }
 
@@ -306,15 +314,27 @@ func (c *Client) MakeFullRequest(ctx context.Context, params RequestParams) ([]b
 			WrappedError: err,
 		}
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	if !params.DontReadBody {
+		defer resp.Body.Close()
+	}
 	var body []byte
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		body, err = mautrix.ParseErrorResponse(req, resp)
 		return body, resp, err
 	} else if params.ResponseJSON != nil || !params.DontReadBody {
-		body, err = io.ReadAll(resp.Body)
+		if resp.ContentLength > c.ResponseSizeLimit {
+			return body, resp, mautrix.HTTPError{
+				Request:  req,
+				Response: resp,
+
+				Message:      "not reading response",
+				WrappedError: fmt.Errorf("%w (%.2f MiB)", mautrix.ErrResponseTooLong, float64(resp.ContentLength)/1024/1024),
+			}
+		}
+		body, err = io.ReadAll(io.LimitReader(resp.Body, c.ResponseSizeLimit+1))
+		if err == nil && len(body) > int(c.ResponseSizeLimit) {
+			err = mautrix.ErrBodyReadReachedLimit
+		}
 		if err != nil {
 			return body, resp, mautrix.HTTPError{
 				Request:  req,

@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
 	"go.mau.fi/util/ptr"
+	"go.mau.fi/util/random"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
@@ -724,6 +725,8 @@ type ResolveIdentifierResponse struct {
 	Chat *CreateChatResponse
 }
 
+var SpecialValueDMRedirectedToBot = networkid.UserID("__fi.mau.bridgev2.dm_redirected_to_bot::" + random.String(10))
+
 type CreateChatResponse struct {
 	PortalKey networkid.PortalKey
 	// Portal and PortalInfo are not required, the caller will fetch them automatically based on PortalKey if necessary.
@@ -732,6 +735,17 @@ type CreateChatResponse struct {
 	// If a start DM request (CreateChatWithGhost or ResolveIdentifier) returns the DM to a different user,
 	// this field should have the user ID of said different user.
 	DMRedirectedTo networkid.UserID
+
+	FailedParticipants map[networkid.UserID]*CreateChatFailedParticipant
+}
+
+type CreateChatFailedParticipant struct {
+	Reason          string         `json:"reason"`
+	InviteEventType string         `json:"invite_event_type,omitempty"`
+	InviteContent   *event.Content `json:"invite_content,omitempty"`
+
+	UserMXID   id.UserID `json:"user_mxid,omitempty"`
+	DMRoomMXID id.RoomID `json:"dm_room_mxid,omitempty"`
 }
 
 // IdentifierResolvingNetworkAPI is an optional interface that network connectors can implement to support starting new direct chats.
@@ -812,12 +826,17 @@ type GroupFieldCapability struct {
 
 	// Only for the disappear field: allowed disappearing settings
 	DisappearSettings *event.DisappearingTimerCapability `json:"settings,omitempty"`
+
+	// This can be used to tell provisionutil not to call ValidateUserID on each participant.
+	// It only meant to allow hacks where ResolveIdentifier returns a fake ID that isn't actually valid for MXIDs.
+	SkipIdentifierValidation bool `json:"-"`
 }
 
 type GroupCreateParams struct {
 	Type string `json:"type,omitempty"`
 
-	Username     string               `json:"username,omitempty"`
+	Username string `json:"username,omitempty"`
+	// Clients may also provide MXIDs here, but provisionutil will normalize them, so bridges only need to handle network IDs
 	Participants []networkid.UserID   `json:"participants,omitempty"`
 	Parent       *networkid.PortalKey `json:"parent,omitempty"`
 
@@ -1118,6 +1137,11 @@ type RemoteDeleteOnlyForMe interface {
 
 type RemoteChatDelete interface {
 	RemoteDeleteOnlyForMe
+}
+
+type RemoteChatDeleteWithChildren interface {
+	RemoteChatDelete
+	DeleteChildren() bool
 }
 
 type RemoteEventThatMayCreatePortal interface {

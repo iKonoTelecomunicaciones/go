@@ -23,8 +23,9 @@ import (
 )
 
 type MatrixCapabilities struct {
-	AutoJoinInvites bool
-	BatchSending    bool
+	AutoJoinInvites       bool
+	BatchSending          bool
+	ArbitraryMemberChange bool
 }
 
 type MatrixConnector interface {
@@ -68,6 +69,7 @@ type MatrixConnectorWithServer interface {
 
 type MatrixConnectorWithPublicMedia interface {
 	GetPublicMediaAddress(contentURI id.ContentURIString) string
+	GetPublicMediaAddressForEvent(ctx context.Context, evt *event.MessageEventContent) (string, error)
 }
 
 type MatrixConnectorWithNameDisambiguation interface {

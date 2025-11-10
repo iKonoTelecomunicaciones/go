@@ -125,9 +125,6 @@ func (userID UserID) ParseAndValidateRelaxed() (localpart, homeserver string, er
 	if err == nil && !ValidateServerName(homeserver) {
 		err = fmt.Errorf("%q %q", homeserver, ErrNoncompliantServerPart)
 	}
-	if err == nil && !ValidateServerName(homeserver) {
-		err = fmt.Errorf("%q %q", homeserver, ErrNoncompliantServerPart)
-	}
 	return
 }
 

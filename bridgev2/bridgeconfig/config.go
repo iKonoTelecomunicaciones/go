@@ -77,6 +77,7 @@ type BridgeConfig struct {
 	DeduplicateMatrixMessages bool             `yaml:"deduplicate_matrix_messages"`
 	CrossRoomReplies          bool             `yaml:"cross_room_replies"`
 	OutgoingMessageReID       bool             `yaml:"outgoing_message_re_id"`
+	RevertFailedStateChanges  bool             `yaml:"revert_failed_state_changes"`
 	CleanupOnLogout           CleanupOnLogouts `yaml:"cleanup_on_logout"`
 	Relay                     RelayConfig      `yaml:"relay"`
 	Permissions               PermissionConfig `yaml:"permissions"`
@@ -113,10 +114,12 @@ type DirectMediaConfig struct {
 }
 
 type PublicMediaConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	SigningKey string `yaml:"signing_key"`
-	HashLength int    `yaml:"hash_length"`
-	Expiry     int    `yaml:"expiry"`
+	Enabled     bool   `yaml:"enabled"`
+	SigningKey  string `yaml:"signing_key"`
+	Expiry      int    `yaml:"expiry"`
+	HashLength  int    `yaml:"hash_length"`
+	PathPrefix  string `yaml:"path_prefix"`
+	UseDatabase bool   `yaml:"use_database"`
 }
 
 type DoublePuppetConfig struct {
