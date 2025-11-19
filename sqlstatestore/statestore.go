@@ -145,7 +145,12 @@ func (store *SQLStateStore) GetDisplayname(ctx context.Context, userID id.UserID
 func (store *SQLStateStore) TryGetDisplayname(ctx context.Context, userID id.UserID) string {
 	var displayname string
 	err := store.
-		QueryRow(ctx, "SELECT displayname FROM mx_user_profile WHERE user_id=$1 AND membership = 'join'", userID).
+		QueryRow(
+			ctx,
+			"SELECT displayname FROM mx_user_profile WHERE user_id=$1 AND "+
+				"displayname is not NULL AND displayname != '' LIMIT 1",
+			userID,
+		).
 		Scan(&displayname)
 	if errors.Is(err, sql.ErrNoRows) {
 		zerolog.Ctx(ctx).Err(err).Msgf("Failed to get display name for user %s", userID)
