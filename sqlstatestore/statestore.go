@@ -148,7 +148,7 @@ func (store *SQLStateStore) TryGetDisplayname(ctx context.Context, userID id.Use
 		QueryRow(
 			ctx,
 			"SELECT displayname FROM mx_user_profile WHERE user_id=$1 AND "+
-				"displayname is not NULL AND displayname != '' LIMIT 1",
+				"displayname IS NOT NULL AND displayname != '' LIMIT 1",
 			userID,
 		).
 		Scan(&displayname)
