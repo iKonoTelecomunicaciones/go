@@ -631,6 +631,10 @@ func (br *Connector) GetMemberInfo(ctx context.Context, roomID id.RoomID, userID
 	return br.AS.StateStore.GetMember(ctx, roomID, userID)
 }
 
+func (br *Connector) GetDisplayname(ctx context.Context, userID id.UserID) string {
+	return br.AS.StateStore.GetDisplayname(ctx, userID)
+}
+
 func (br *Connector) IsConfusableName(ctx context.Context, roomID id.RoomID, userID id.UserID, name string) ([]id.UserID, error) {
 	return br.AS.StateStore.IsConfusableName(ctx, roomID, userID, name)
 }
