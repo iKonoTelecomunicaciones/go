@@ -153,10 +153,10 @@ func (store *SQLStateStore) TryGetDisplayname(ctx context.Context, userID id.Use
 		).
 		Scan(&displayname)
 	if errors.Is(err, sql.ErrNoRows) {
-		zerolog.Ctx(ctx).Err(err).Msgf("Failed to get display name for user %s", userID)
+		zerolog.Ctx(ctx).Err(err).Stringer("userID", userID).Msg("Failed to get display name for user")
 		return ""
 	} else if err != nil {
-		zerolog.Ctx(ctx).Err(err).Msgf("Failed to get display name for user %s", userID)
+		zerolog.Ctx(ctx).Err(err).Stringer("userID", userID).Msg("Failed to get display name for user")
 		return ""
 	}
 	return displayname
