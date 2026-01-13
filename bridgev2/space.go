@@ -11,8 +11,9 @@ import (
 	"fmt"
 	"time"
 
-	ikono "github.com/iKonoTelecomunicaciones/go"
 	"github.com/rs/zerolog"
+
+	ikono "github.com/iKonoTelecomunicaciones/go"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/event"

@@ -812,6 +812,8 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 	case event.BeeperDeleteChat:
 		portal.Log.Info().Msg("Ignoring m.beeper.delete_chat event")
 		return EventHandlingResultIgnored
+	case event.BeeperAcceptMessageRequest:
+		return portal.handleMatrixAcceptMessageRequest(ctx, login, origSender, evt)
 	default:
 		return EventHandlingResultIgnored
 	}

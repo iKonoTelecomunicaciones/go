@@ -12,10 +12,11 @@ import (
 	"slices"
 	"time"
 
-	ikono "github.com/iKonoTelecomunicaciones/go"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/variationselector"
+
+	ikono "github.com/iKonoTelecomunicaciones/go"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
