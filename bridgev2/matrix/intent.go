@@ -48,8 +48,7 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 	if extra == nil {
 		extra = &bridgev2.MatrixSendExtra{}
 	}
-	// TODO remove this once hungryserv and synapse support sending m.room.redactions directly in all room versions
-	if eventType == event.EventRedaction {
+	if eventType == event.EventRedaction && !as.Connector.SpecVersions.Supports(mautrix.FeatureRedactSendAsEvent) {
 		parsedContent := content.Parsed.(*event.RedactionEventContent)
 		as.Matrix.AddDoublePuppetValue(content)
 		return as.Matrix.RedactEvent(ctx, roomID, parsedContent.Redacts, mautrix.ReqRedact{
@@ -82,11 +81,7 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 			eventType = event.EventEncrypted
 		}
 	}
-	if extra.Timestamp.IsZero() {
-		return as.Matrix.SendMessageEvent(ctx, roomID, eventType, content)
-	} else {
-		return as.Matrix.SendMassagedMessageEvent(ctx, roomID, eventType, content, extra.Timestamp.UnixMilli())
-	}
+	return as.Matrix.SendMessageEvent(ctx, roomID, eventType, content, mautrix.ReqSendEvent{Timestamp: extra.Timestamp.UnixMilli()})
 }
 
 func (as *ASIntent) fillMemberEvent(ctx context.Context, roomID id.RoomID, userID id.UserID, content *event.Content) {
@@ -126,11 +121,7 @@ func (as *ASIntent) SendState(ctx context.Context, roomID id.RoomID, eventType e
 	if eventType == event.StateMember {
 		as.fillMemberEvent(ctx, roomID, id.UserID(stateKey), content)
 	}
-	if ts.IsZero() {
-		resp, err = as.Matrix.SendStateEvent(ctx, roomID, eventType, stateKey, content)
-	} else {
-		resp, err = as.Matrix.SendMassagedStateEvent(ctx, roomID, eventType, stateKey, content, ts.UnixMilli())
-	}
+	resp, err = as.Matrix.SendStateEvent(ctx, roomID, eventType, stateKey, content, mautrix.ReqSendEvent{Timestamp: ts.UnixMilli()})
 	if err != nil && eventType == event.StateMember {
 		var httpErr mautrix.HTTPError
 		if errors.As(err, &httpErr) && httpErr.RespError != nil &&
@@ -521,6 +512,39 @@ func (br *Connector) getDefaultEncryptionEvent() *event.EncryptionEventContent {
 	return content
 }
 
+func (as *ASIntent) filterCreateRequestForV12(ctx context.Context, req *mautrix.ReqCreateRoom) {
+	if as.Connector.Config.Homeserver.Software == bridgeconfig.SoftwareHungry {
+		// Hungryserv doesn't override the capabilities endpoint nor do room versions
+		return
+	}
+	caps := as.Connector.fetchCapabilities(ctx)
+	roomVer := req.RoomVersion
+	if roomVer == "" && caps != nil && caps.RoomVersions != nil {
+		roomVer = id.RoomVersion(caps.RoomVersions.Default)
+	}
+	if roomVer != "" && !roomVer.PrivilegedRoomCreators() {
+		return
+	}
+	creators, _ := req.CreationContent["additional_creators"].([]id.UserID)
+	creators = append(slices.Clone(creators), as.GetMXID())
+	if req.PowerLevelOverride != nil {
+		for _, creator := range creators {
+			delete(req.PowerLevelOverride.Users, creator)
+		}
+	}
+	for _, evt := range req.InitialState {
+		if evt.Type != event.StatePowerLevels {
+			continue
+		}
+		content, ok := evt.Content.Parsed.(*event.PowerLevelsEventContent)
+		if ok {
+			for _, creator := range creators {
+				delete(content.Users, creator)
+			}
+		}
+	}
+}
+
 func (as *ASIntent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) (id.RoomID, error) {
 	if as.Connector.Config.Encryption.Default {
 		req.InitialState = append(req.InitialState, &event.Event{
@@ -536,6 +560,7 @@ func (as *ASIntent) CreateRoom(ctx context.Context, req *mautrix.ReqCreateRoom) 
 		}
 		req.CreationContent["m.federate"] = false
 	}
+	as.filterCreateRequestForV12(ctx, req)
 	resp, err := as.Matrix.CreateRoom(ctx, req)
 	if err != nil {
 		return "", err

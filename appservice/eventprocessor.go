@@ -12,8 +12,9 @@ import (
 	"runtime/debug"
 	"time"
 
-	mautrix "github.com/iKonoTelecomunicaciones/go"
 	"github.com/rs/zerolog"
+
+	mautrix "github.com/iKonoTelecomunicaciones/go"
 
 	"github.com/iKonoTelecomunicaciones/go/event"
 )

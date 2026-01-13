@@ -11,8 +11,9 @@ import (
 	"fmt"
 	"time"
 
-	ikono "github.com/iKonoTelecomunicaciones/go"
 	"github.com/rs/zerolog"
+
+	ikono "github.com/iKonoTelecomunicaciones/go"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/event"
@@ -171,6 +172,10 @@ func (ul *UserLogin) GetSpaceRoom(ctx context.Context) (id.RoomID, error) {
 		req.BeeperInitialMembers = []id.UserID{ul.UserMXID}
 		// TODO remove this after initial_members is supported in hungryserv
 		req.BeeperAutoJoinInvites = true
+	}
+	pfc, ok := ul.Client.(PersonalFilteringCustomizingNetworkAPI)
+	if ok {
+		pfc.CustomizePersonalFilteringSpace(req)
 	}
 	ul.SpaceRoom, err = ul.Bridge.Bot.CreateRoom(ctx, req)
 	if err != nil {

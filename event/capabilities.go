@@ -60,6 +60,10 @@ type RoomFeatures struct {
 	MarkAsUnread          bool `json:"mark_as_unread,omitempty"`
 	DeleteChat            bool `json:"delete_chat,omitempty"`
 	DeleteChatForEveryone bool `json:"delete_chat_for_everyone,omitempty"`
+
+	MessageRequest *MessageRequestFeatures `json:"message_request,omitempty"`
+
+	PerMessageProfileRelay bool `json:"-"`
 }
 
 func (rf *RoomFeatures) GetID() string {
@@ -82,6 +86,7 @@ func (rf *RoomFeatures) Clone() *RoomFeatures {
 	clone.DeleteMaxAge = ptr.Clone(clone.DeleteMaxAge)
 	clone.DisappearingTimer = clone.DisappearingTimer.Clone()
 	clone.AllowedReactions = slices.Clone(clone.AllowedReactions)
+	clone.MessageRequest = clone.MessageRequest.Clone()
 	return &clone
 }
 
@@ -161,6 +166,25 @@ func (dtc *DisappearingTimerCapability) Supports(content *BeeperDisappearingTime
 		return true
 	}
 	return slices.Contains(dtc.Types, content.Type) && (dtc.Timers == nil || slices.Contains(dtc.Timers, content.Timer))
+}
+
+type MessageRequestFeatures struct {
+	AcceptWithMessage CapabilitySupportLevel `json:"accept_with_message,omitempty"`
+	AcceptWithButton  CapabilitySupportLevel `json:"accept_with_button,omitempty"`
+}
+
+func (mrf *MessageRequestFeatures) Clone() *MessageRequestFeatures {
+	return ptr.Clone(mrf)
+}
+
+func (mrf *MessageRequestFeatures) Hash() []byte {
+	if mrf == nil {
+		return nil
+	}
+	hasher := sha256.New()
+	hashValue(hasher, "accept_with_message", mrf.AcceptWithMessage)
+	hashValue(hasher, "accept_with_button", mrf.AcceptWithButton)
+	return hasher.Sum(nil)
 }
 
 type CapabilityMsgType = MessageType
@@ -345,6 +369,7 @@ func (rf *RoomFeatures) Hash() []byte {
 	hashBool(hasher, "mark_as_unread", rf.MarkAsUnread)
 	hashBool(hasher, "delete_chat", rf.DeleteChat)
 	hashBool(hasher, "delete_chat_for_everyone", rf.DeleteChatForEveryone)
+	hashValue(hasher, "message_request", rf.MessageRequest)
 
 	return hasher.Sum(nil)
 }

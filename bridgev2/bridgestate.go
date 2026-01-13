@@ -22,6 +22,8 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/format"
 )
 
+var CatchBridgeStateQueuePanics = true
+
 type BridgeStateQueue struct {
 	prevUnsent *status.BridgeState
 	prevSent   *status.BridgeState
@@ -84,23 +86,25 @@ func (bsq *BridgeStateQueue) StopUnknownErrorReconnect() {
 }
 
 func (bsq *BridgeStateQueue) loop() {
-	defer func() {
-		err := recover()
-		if err != nil {
-			bsq.login.Log.Error().
-				Bytes(zerolog.ErrorStackFieldName, debug.Stack()).
-				Any(zerolog.ErrorFieldName, err).
-				Msg("Panic in bridge state loop")
-		}
-	}()
+	if CatchBridgeStateQueuePanics {
+		defer func() {
+			err := recover()
+			if err != nil {
+				bsq.login.Log.Error().
+					Bytes(zerolog.ErrorStackFieldName, debug.Stack()).
+					Any(zerolog.ErrorFieldName, err).
+					Msg("Panic in bridge state loop")
+			}
+		}()
+	}
 	for state := range bsq.ch {
 		bsq.immediateSendBridgeState(state)
 	}
 }
 
-func (bsq *BridgeStateQueue) scheduleNotice(ctx context.Context, triggeredBy status.BridgeState) {
+func (bsq *BridgeStateQueue) scheduleNotice(triggeredBy status.BridgeState) {
 	log := bsq.login.Log.With().Str("action", "transient disconnect notice").Logger()
-	ctx = log.WithContext(bsq.bridge.BackgroundCtx)
+	ctx := log.WithContext(bsq.bridge.BackgroundCtx)
 	if !bsq.waitForTransientDisconnectReconnect(ctx) {
 		return
 	}
@@ -131,7 +135,7 @@ func (bsq *BridgeStateQueue) sendNotice(ctx context.Context, state status.Bridge
 			if bsq.firstTransientDisconnect.IsZero() {
 				bsq.firstTransientDisconnect = time.Now()
 			}
-			go bsq.scheduleNotice(ctx, state)
+			go bsq.scheduleNotice(state)
 		}
 		return
 	}

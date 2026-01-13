@@ -41,6 +41,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "bridge", "deduplicate_matrix_messages")
 	helper.Copy(up.Bool, "bridge", "cross_room_replies")
 	helper.Copy(up.Bool, "bridge", "revert_failed_state_changes")
+	helper.Copy(up.Bool, "bridge", "kick_matrix_users")
 	helper.Copy(up.Bool, "bridge", "cleanup_on_logout", "enabled")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "private")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "relayed")
@@ -185,6 +186,8 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Int, "encryption", "rotation", "messages")
 	helper.Copy(up.Bool, "encryption", "rotation", "disable_device_change_key_rotation")
 
+	helper.Copy(up.Str|up.Null, "env_config_prefix")
+
 	helper.Copy(up.Map, "logging")
 }
 
@@ -212,6 +215,7 @@ var SpacedBlocks = [][]string{
 	{"backfill"},
 	{"double_puppet"},
 	{"encryption"},
+	{"env_config_prefix"},
 	{"logging"},
 }
 

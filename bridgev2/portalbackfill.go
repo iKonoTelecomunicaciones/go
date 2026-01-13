@@ -12,10 +12,11 @@ import (
 	"slices"
 	"time"
 
-	ikono "github.com/iKonoTelecomunicaciones/go"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/variationselector"
+
+	ikono "github.com/iKonoTelecomunicaciones/go"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
@@ -193,6 +194,9 @@ func (portal *Portal) doThreadBackfill(ctx context.Context, source *UserLogin, t
 	anchorMessage, err := portal.Bridge.DB.Message.GetLastThreadMessage(ctx, portal.PortalKey, threadID)
 	if err != nil {
 		log.Err(err).Msg("Failed to get last thread message")
+		return
+	} else if anchorMessage == nil {
+		log.Warn().Msg("No messages found in thread?")
 		return
 	}
 	resp := portal.fetchThreadBackfill(ctx, source, anchorMessage)
@@ -394,6 +398,9 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 	}
 	slices.Sort(partIDs)
 	for _, reaction := range msg.Reactions {
+		if reaction == nil {
+			continue
+		}
 		reactionIntent, ok := portal.GetIntentFor(ctx, reaction.Sender, source, RemoteEventReactionRemove)
 		if !ok {
 			continue
@@ -404,6 +411,7 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 		if reaction.Timestamp.IsZero() {
 			reaction.Timestamp = msg.Timestamp.Add(10 * time.Millisecond)
 		}
+		//lint:ignore SA4006 it's a todo
 		targetPart, ok := partMap[*reaction.TargetPart]
 		if !ok {
 			// TODO warning log and/or skip reaction?

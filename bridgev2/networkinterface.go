@@ -18,6 +18,7 @@ import (
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/random"
 
+	mautrix "github.com/iKonoTelecomunicaciones/go"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
 	"github.com/iKonoTelecomunicaciones/go/event"
@@ -292,6 +293,11 @@ type TransactionIDGeneratingNetwork interface {
 type PortalBridgeInfoFillingNetwork interface {
 	NetworkConnector
 	FillPortalBridgeInfo(portal *Portal, content *event.BridgeEventContent)
+}
+
+type PersonalFilteringCustomizingNetworkAPI interface {
+	NetworkAPI
+	CustomizePersonalFilteringSpace(req *mautrix.ReqCreateRoom)
 }
 
 // ConfigValidatingNetwork is an optional interface that network connectors can implement to validate config fields
@@ -706,6 +712,14 @@ type DeleteChatHandlingNetworkAPI interface {
 	HandleMatrixDeleteChat(ctx context.Context, msg *MatrixDeleteChat) error
 }
 
+// MessageRequestAcceptingNetworkAPI is an optional interface that network connectors
+// can implement to accept message requests from the remote network.
+type MessageRequestAcceptingNetworkAPI interface {
+	NetworkAPI
+	// HandleMatrixAcceptMessageRequest is called when the user accepts a message request.
+	HandleMatrixAcceptMessageRequest(ctx context.Context, msg *MatrixAcceptMessageRequest) error
+}
+
 type ResolveIdentifierResponse struct {
 	// Ghost is the ghost of the user that the identifier resolves to.
 	// This field should be set whenever possible. However, it is not required,
@@ -891,16 +905,15 @@ type MatrixMembershipChange struct {
 	MatrixRoomMeta[*event.MemberEventContent]
 	Target GhostOrUserLogin
 	Type   MembershipChangeType
+}
 
-	// Deprecated: Use Target instead
-	TargetGhost *Ghost
-	// Deprecated: Use Target instead
-	TargetUserLogin *UserLogin
+type MatrixMembershipResult struct {
+	RedirectTo networkid.UserID
 }
 
 type MembershipHandlingNetworkAPI interface {
 	NetworkAPI
-	HandleMatrixMembership(ctx context.Context, msg *MatrixMembershipChange) (bool, error)
+	HandleMatrixMembership(ctx context.Context, msg *MatrixMembershipChange) (*MatrixMembershipResult, error)
 }
 
 type SinglePowerLevelChange struct {
@@ -1376,7 +1389,8 @@ type MatrixMessageRemove struct {
 
 type MatrixRoomMeta[ContentType any] struct {
 	MatrixEventBase[ContentType]
-	PrevContent ContentType
+	PrevContent    ContentType
+	IsStateRequest bool
 }
 
 type MatrixRoomName = MatrixRoomMeta[*event.RoomNameEventContent]
@@ -1413,6 +1427,7 @@ type MatrixViewingChat struct {
 }
 
 type MatrixDeleteChat = MatrixEventBase[*event.BeeperChatDeleteEventContent]
+type MatrixAcceptMessageRequest = MatrixEventBase[*event.BeeperAcceptMessageRequestEventContent]
 type MatrixMarkedUnread = MatrixRoomMeta[*event.MarkedUnreadEventContent]
 type MatrixMute = MatrixRoomMeta[*event.BeeperMuteEventContent]
 type MatrixRoomTag = MatrixRoomMeta[*event.TagEventContent]

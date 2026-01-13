@@ -26,6 +26,7 @@ import (
 	_ "go.mau.fi/util/dbutil/litestream"
 	"go.mau.fi/util/exbytes"
 	"go.mau.fi/util/exsync"
+	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/random"
 	"golang.org/x/sync/semaphore"
 
@@ -80,6 +81,8 @@ type Connector struct {
 
 	MediaConfig             mautrix.RespMediaConfig
 	SpecVersions            *mautrix.RespVersions
+	SpecCaps                *mautrix.RespCapabilities
+	specCapsLock            sync.Mutex
 	Capabilities            *bridgev2.MatrixCapabilities
 	IgnoreUnsupportedServer bool
 
@@ -144,11 +147,13 @@ func (br *Connector) Init(bridge *bridgev2.Bridge) {
 	br.EventProcessor.On(event.StateMember, br.handleRoomEvent)
 	br.EventProcessor.On(event.StatePowerLevels, br.handleRoomEvent)
 	br.EventProcessor.On(event.StateRoomName, br.handleRoomEvent)
+	br.EventProcessor.On(event.BeeperSendState, br.handleRoomEvent)
 	br.EventProcessor.On(event.StateRoomAvatar, br.handleRoomEvent)
 	br.EventProcessor.On(event.StateTopic, br.handleRoomEvent)
 	br.EventProcessor.On(event.StateTombstone, br.handleRoomEvent)
 	br.EventProcessor.On(event.StateBeeperDisappearingTimer, br.handleRoomEvent)
 	br.EventProcessor.On(event.BeeperDeleteChat, br.handleRoomEvent)
+	br.EventProcessor.On(event.BeeperAcceptMessageRequest, br.handleRoomEvent)
 	br.EventProcessor.On(event.EphemeralEventReceipt, br.handleEphemeralEvent)
 	br.EventProcessor.On(event.EphemeralEventTyping, br.handleEphemeralEvent)
 	br.Bot = br.AS.BotIntent()
@@ -406,6 +411,21 @@ func (br *Connector) ensureConnection(ctx context.Context) {
 	br.Bot.EnsureAppserviceConnection(ctx)
 }
 
+func (br *Connector) fetchCapabilities(ctx context.Context) *mautrix.RespCapabilities {
+	br.specCapsLock.Lock()
+	defer br.specCapsLock.Unlock()
+	if br.SpecCaps != nil {
+		return br.SpecCaps
+	}
+	caps, err := br.Bot.Capabilities(ctx)
+	if err != nil {
+		br.Log.Err(err).Msg("Failed to fetch capabilities from homeserver")
+		return nil
+	}
+	br.SpecCaps = caps
+	return caps
+}
+
 func (br *Connector) fetchMediaConfig(ctx context.Context) {
 	cfg, err := br.Bot.GetMediaConfig(ctx)
 	if err != nil {
@@ -599,13 +619,28 @@ func (br *Connector) GetPowerLevels(ctx context.Context, roomID id.RoomID) (*eve
 }
 
 func (br *Connector) GetStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string) (*event.Event, error) {
-	if eventType == event.StateCreate && stateKey == "" {
-		createEvt, err := br.Bot.StateStore.GetCreate(ctx, roomID)
-		if err != nil || createEvt != nil {
-			return createEvt, err
+	if stateKey == "" {
+		switch eventType {
+		case event.StateCreate:
+			createEvt, err := br.Bot.StateStore.GetCreate(ctx, roomID)
+			if err != nil || createEvt != nil {
+				return createEvt, err
+			}
+		case event.StateJoinRules:
+			joinRulesContent, err := br.Bot.StateStore.GetJoinRules(ctx, roomID)
+			if err != nil {
+				return nil, err
+			} else if joinRulesContent != nil {
+				return &event.Event{
+					Type:     event.StateJoinRules,
+					RoomID:   roomID,
+					StateKey: ptr.Ptr(""),
+					Content:  event.Content{Parsed: joinRulesContent},
+				}, nil
+			}
 		}
 	}
-	return br.Bot.FullStateEvent(ctx, roomID, eventType, "")
+	return br.Bot.FullStateEvent(ctx, roomID, eventType, stateKey)
 }
 
 func (br *Connector) GetMembers(ctx context.Context, roomID id.RoomID) (map[id.UserID]*event.MemberEventContent, error) {

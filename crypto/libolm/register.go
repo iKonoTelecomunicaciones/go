@@ -9,7 +9,7 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
 )
 
-var pickleKey = []byte("github.com/iKonoTelecomunicaciones/go/crypto/olm")
+var pickleKey = []byte("maunium.net/go/mautrix/crypto/olm")
 
 func Register() {
 	olm.Driver = "libolm"
@@ -65,7 +65,7 @@ func Register() {
 
 	olm.InitNewOutboundGroupSessionFromPickled = func(pickled, key []byte) (olm.OutboundGroupSession, error) {
 		if len(pickled) == 0 {
-			return nil, olm.EmptyInput
+			return nil, olm.ErrEmptyInput
 		}
 		s := NewBlankOutboundGroupSession()
 		return s, s.Unpickle(pickled, key)
