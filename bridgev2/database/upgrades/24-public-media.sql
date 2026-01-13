@@ -1,5 +1,5 @@
 -- v24 (compatible with v9+): Custom URLs for public media
-CREATE TABLE public_media (
+CREATE TABLE IF NOT EXISTS public_media (
 	bridge_id TEXT   NOT NULL,
 	public_id TEXT   NOT NULL,
 	mxc       TEXT   NOT NULL,
