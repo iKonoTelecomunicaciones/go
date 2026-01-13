@@ -11,8 +11,8 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/bridgev2"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 )
 
 type RespGetContactList struct {

@@ -11,10 +11,9 @@ import (
 	"crypto/rand"
 	"testing"
 
+	"github.com/iKonoTelecomunicaciones/go/crypto/aescbc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"maunium.net/go/mautrix/crypto/aescbc"
 )
 
 func TestAESCBC(t *testing.T) {

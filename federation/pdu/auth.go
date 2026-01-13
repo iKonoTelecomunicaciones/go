@@ -14,8 +14,8 @@ import (
 	"github.com/tidwall/gjson"
 	"go.mau.fi/util/exgjson"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type StateKey struct {
@@ -61,7 +61,7 @@ func (pdu *PDU) AuthEventSelection(roomVersion id.RoomVersion) (keys AuthEventSe
 			}
 		}
 		if membership == event.MembershipJoin && roomVersion.RestrictedJoins() {
-			authorizedVia := gjson.GetBytes(pdu.Content, "authorised_via_users_server").Str
+			authorizedVia := gjson.GetBytes(pdu.Content, "authorized_via_users_server").Str
 			if authorizedVia != "" {
 				keys.Add(event.StateMember.Type, authorizedVia)
 			}

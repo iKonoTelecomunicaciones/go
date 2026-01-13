@@ -6,7 +6,7 @@ import "C"
 import (
 	"unsafe"
 
-	"maunium.net/go/mautrix/crypto/olm"
+	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
 )
 
 var pickleKey = []byte("maunium.net/go/mautrix/crypto/olm")

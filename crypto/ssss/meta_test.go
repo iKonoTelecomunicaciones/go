@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.mau.fi/util/exerrors"
 
-	"maunium.net/go/mautrix/crypto/ssss"
+	"github.com/iKonoTelecomunicaciones/go/crypto/ssss"
 )
 
 const key1Meta = `
