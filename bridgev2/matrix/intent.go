@@ -56,7 +56,7 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 			Extra:  content.Raw,
 		})
 	}
-	if eventType != event.EventReaction && eventType != event.EventRedaction {
+	if (eventType != event.EventReaction || as.Connector.Config.Encryption.MSC4392) && eventType != event.EventRedaction {
 		msgContent, ok := content.Parsed.(*event.MessageEventContent)
 		if ok {
 			msgContent.AddPerMessageProfileFallback()
@@ -714,10 +714,10 @@ func (as *ASIntent) GetEvent(ctx context.Context, roomID id.RoomID, eventID id.E
 	}
 
 	if evt.Type == event.EventEncrypted {
-		if as.Connector.Config.Encryption.DeleteKeys.RatchetOnDecrypt {
+		if as.Connector.Crypto == nil || as.Connector.Config.Encryption.DeleteKeys.RatchetOnDecrypt {
 			return nil, errors.New("can't decrypt the event")
 		}
-		return as.Matrix.Crypto.Decrypt(ctx, evt)
+		return as.Connector.Crypto.Decrypt(ctx, evt)
 	}
 
 	return evt, nil

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tulir Asokan
+// Copyright (c) 2026 Tulir Asokan
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -8,6 +8,9 @@ package commands
 
 import (
 	"strings"
+
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/event/cmdschema"
 )
 
 type Handler[MetaType any] struct {
@@ -25,12 +28,63 @@ type Handler[MetaType any] struct {
 	// Event.ShiftArg will likely be useful for implementing such parameters.
 	PreFunc func(ce *Event[MetaType])
 
+	// Description is a short description of the command.
+	Description *event.ExtensibleTextContainer
+	// Parameters is a description of structured command parameters.
+	// If set, the StructuredArgs field of Event will be populated.
+	Parameters []*cmdschema.Parameter
+	TailParam  string
+
+	parents             []*Handler[MetaType]
+	nestedNameCache     []string
 	subcommandContainer *CommandContainer[MetaType]
+}
+
+func (h *Handler[MetaType]) NestedNames() []string {
+	if h.nestedNameCache != nil {
+		return h.nestedNameCache
+	}
+	nestedNames := make([]string, 0, (1+len(h.Aliases))*len(h.parents))
+	for _, parent := range h.parents {
+		if parent == nil {
+			nestedNames = append(nestedNames, h.Name)
+			nestedNames = append(nestedNames, h.Aliases...)
+		} else {
+			for _, parentName := range parent.NestedNames() {
+				nestedNames = append(nestedNames, parentName+" "+h.Name)
+				for _, alias := range h.Aliases {
+					nestedNames = append(nestedNames, parentName+" "+alias)
+				}
+			}
+		}
+	}
+	h.nestedNameCache = nestedNames
+	return nestedNames
+}
+
+func (h *Handler[MetaType]) Spec() *cmdschema.EventContent {
+	names := h.NestedNames()
+	return &cmdschema.EventContent{
+		Command:     names[0],
+		Aliases:     names[1:],
+		Parameters:  h.Parameters,
+		Description: h.Description,
+		TailParam:   h.TailParam,
+	}
+}
+
+func (h *Handler[MetaType]) CopyFrom(other *Handler[MetaType]) {
+	if h.Parameters == nil {
+		h.Parameters = other.Parameters
+		h.TailParam = other.TailParam
+	}
+	h.Func = other.Func
 }
 
 func (h *Handler[MetaType]) initSubcommandContainer() {
 	if len(h.Subcommands) > 0 {
 		h.subcommandContainer = NewCommandContainer[MetaType]()
+		h.subcommandContainer.parent = h
 		h.subcommandContainer.Register(h.Subcommands...)
 	} else {
 		h.subcommandContainer = nil

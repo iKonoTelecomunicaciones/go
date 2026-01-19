@@ -261,6 +261,7 @@ type NetworkConnector interface {
 }
 
 type StoppableNetwork interface {
+	NetworkConnector
 	// Stop is called when the bridge is stopping, after all network clients have been disconnected.
 	Stop()
 }
@@ -295,11 +296,6 @@ type PortalBridgeInfoFillingNetwork interface {
 	FillPortalBridgeInfo(portal *Portal, content *event.BridgeEventContent)
 }
 
-type PersonalFilteringCustomizingNetworkAPI interface {
-	NetworkAPI
-	CustomizePersonalFilteringSpace(req *mautrix.ReqCreateRoom)
-}
-
 // ConfigValidatingNetwork is an optional interface that network connectors can implement to validate config fields
 // before the bridge is started.
 //
@@ -320,6 +316,16 @@ type ConfigValidatingNetwork interface {
 type MaxFileSizeingNetwork interface {
 	NetworkConnector
 	SetMaxFileSize(maxSize int64)
+}
+
+type NetworkResettingNetwork interface {
+	NetworkConnector
+	// ResetHTTPTransport should recreate the HTTP client used by the bridge.
+	// It should refetch settings from the Matrix connector using GetHTTPClientSettings if applicable.
+	ResetHTTPTransport()
+	// ResetNetworkConnections should forcefully disconnect and restart any persistent network connections.
+	// ResetHTTPTransport will usually be called before this, so resetting the transport is not necessary here.
+	ResetNetworkConnections()
 }
 
 type RemoteEchoHandler func(RemoteMessage, *database.Message) (bool, error)
@@ -792,6 +798,16 @@ type UserSearchingNetworkAPI interface {
 	SearchUsers(ctx context.Context, query string) ([]*ResolveIdentifierResponse, error)
 }
 
+type GroupCreatingNetworkAPI interface {
+	IdentifierResolvingNetworkAPI
+	CreateGroup(ctx context.Context, params *GroupCreateParams) (*CreateChatResponse, error)
+}
+
+type PersonalFilteringCustomizingNetworkAPI interface {
+	NetworkAPI
+	CustomizePersonalFilteringSpace(req *mautrix.ReqCreateRoom)
+}
+
 type ProvisioningCapabilities struct {
 	ResolveIdentifier ResolveIdentifierCapabilities    `json:"resolve_identifier"`
 	GroupCreation     map[string]GroupTypeCapabilities `json:"group_creation"`
@@ -861,11 +877,6 @@ type GroupCreateParams struct {
 
 	// An existing room ID to bridge to. If unset, a new room will be created.
 	RoomID id.RoomID `json:"room_id,omitempty"`
-}
-
-type GroupCreatingNetworkAPI interface {
-	IdentifierResolvingNetworkAPI
-	CreateGroup(ctx context.Context, params *GroupCreateParams) (*CreateChatResponse, error)
 }
 
 type MembershipChangeType struct {

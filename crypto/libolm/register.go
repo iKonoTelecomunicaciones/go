@@ -9,7 +9,7 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
 )
 
-var pickleKey = []byte("maunium.net/go/mautrix/crypto/olm")
+var pickleKey = []byte("github.com/iKonoTelecomunicaciones/go/crypto/olm")
 
 func Register() {
 	olm.Driver = "libolm"
