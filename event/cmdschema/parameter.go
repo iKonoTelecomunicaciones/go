@@ -13,7 +13,7 @@ import (
 
 	"go.mau.fi/util/exslices"
 
-	"maunium.net/go/mautrix/event"
+	"github.com/iKonoTelecomunicaciones/go/event"
 )
 
 type Parameter struct {

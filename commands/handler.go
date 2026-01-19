@@ -9,8 +9,8 @@ package commands
 import (
 	"strings"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/event/cmdschema"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/event/cmdschema"
 )
 
 type Handler[MetaType any] struct {
