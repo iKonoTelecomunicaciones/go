@@ -14,8 +14,8 @@ import (
 
 	"go.mau.fi/util/exerrors"
 
-	"maunium.net/go/mautrix/federation/pdu"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/federation/pdu"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type serverKey struct {

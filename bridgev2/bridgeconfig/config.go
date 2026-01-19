@@ -13,8 +13,8 @@ import (
 	"go.mau.fi/zeroconfig"
 	"gopkg.in/yaml.v3"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/mediaproxy"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/mediaproxy"
 )
 
 type Config struct {
@@ -85,6 +85,8 @@ type BridgeConfig struct {
 	Relay                     RelayConfig      `yaml:"relay"`
 	Permissions               PermissionConfig `yaml:"permissions"`
 	Backfill                  BackfillConfig   `yaml:"backfill"`
+	RenameRoom                bool             `yaml:"rename_room"`
+	DeleteMessages            bool             `yaml:"delete_messages"`
 }
 
 type MatrixConfig struct {

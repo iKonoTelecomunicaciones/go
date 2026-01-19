@@ -2,7 +2,7 @@
 
 package crypto
 
-import "maunium.net/go/mautrix/crypto/libolm"
+import "github.com/iKonoTelecomunicaciones/go/crypto/libolm"
 
 func init() {
 	libolm.Register()

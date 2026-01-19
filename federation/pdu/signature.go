@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"time"
 
-	"maunium.net/go/mautrix/federation/signutil"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/federation/signutil"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 func (pdu *PDU) Sign(roomVersion id.RoomVersion, serverName string, keyID id.KeyID, privateKey ed25519.PrivateKey) error {

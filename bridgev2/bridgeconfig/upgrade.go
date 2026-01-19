@@ -12,7 +12,7 @@ import (
 	up "go.mau.fi/util/configupgrade"
 	"go.mau.fi/util/random"
 
-	"maunium.net/go/mautrix/federation"
+	"github.com/iKonoTelecomunicaciones/go/federation"
 )
 
 func doUpgrade(helper up.Helper) {
@@ -56,6 +56,8 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.List, "bridge", "relay", "default_relays")
 	helper.Copy(up.Map, "bridge", "relay", "message_formats")
 	helper.Copy(up.Str, "bridge", "relay", "displayname_format")
+	helper.Copy(up.Bool, "bridge", "rename_room")
+	helper.Copy(up.Bool, "bridge", "delete_messages")
 	helper.Copy(up.Map, "bridge", "permissions")
 
 	if dbType, ok := helper.Get(up.Str, "database", "type"); ok && dbType == "sqlite3" {
