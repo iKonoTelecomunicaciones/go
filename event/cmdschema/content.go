@@ -16,8 +16,8 @@ import (
 	"go.mau.fi/util/exsync"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type EventContent struct {

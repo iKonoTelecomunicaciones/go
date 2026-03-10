@@ -12,7 +12,7 @@ import (
 	"slices"
 	"strings"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 var ParameterSchemaJoinableRoom = Union(

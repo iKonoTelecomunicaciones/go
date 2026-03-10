@@ -16,7 +16,7 @@ import (
 	"go.mau.fi/util/exgjson"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 func filteredObject(object jsontext.Value, allowedPaths ...string) jsontext.Value {

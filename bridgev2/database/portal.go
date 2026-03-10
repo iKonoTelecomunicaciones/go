@@ -15,9 +15,9 @@ import (
 
 	"go.mau.fi/util/dbutil"
 
-	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type RoomType string
@@ -154,6 +154,12 @@ const (
 		WHERE bridge_id=$1 AND parent_receiver='' AND receiver<>'' AND parent_id<>''
 		  AND EXISTS(SELECT 1 FROM portal pp WHERE pp.bridge_id=$1 AND pp.id=portal.parent_id AND pp.receiver=portal.receiver);
 	`
+
+	UpdateSetRelayFromUserQuery = `
+		UPDATE portal
+		SET relay_login_id=$1
+		WHERE receiver = $1 AND relay_login_id IS NULL OR relay_login_id = ''
+	`
 )
 
 func (pq *PortalQuery) GetByKey(ctx context.Context, key networkid.PortalKey) (*Portal, error) {
@@ -232,6 +238,10 @@ func (pq *PortalQuery) FixParentsAfterSplitPortalMigration(ctx context.Context) 
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func (pq *PortalQuery) UpdateSetRelayFromUser(ctx context.Context, loginID string) error {
+	return pq.Exec(ctx, UpdateSetRelayFromUserQuery, loginID)
 }
 
 func (p *Portal) Scan(row dbutil.Scannable) (*Portal, error) {

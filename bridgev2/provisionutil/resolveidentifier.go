@@ -12,10 +12,10 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/id"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type RespResolveIdentifier struct {
@@ -109,7 +109,6 @@ func ResolveIdentifier(
 				return nil, bridgev2.RespError(mautrix.MUnknown.WithMessage("Failed to get portal"))
 			}
 		}
-		resp.Chat.Portal.CleanupOrphanedDM(ctx, login.UserMXID)
 		if createChat && resp.Chat.Portal.MXID == "" {
 			apiResp.JustCreated = true
 			err := resp.Chat.Portal.CreateMatrixRoom(ctx, login, resp.Chat.PortalInfo)

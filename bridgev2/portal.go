@@ -27,11 +27,11 @@ import (
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/bridgev2/database"
-	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type portalMatrixEvent struct {
@@ -732,6 +732,7 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 			origSender.MemberEventContent = *memberInfo
 			if memberInfo.Displayname == "" {
 				origSender.DisambiguatedName = sender.MXID.String()
+				origSender.Displayname = portal.Bridge.Matrix.GetDisplayname(ctx, sender.MXID)
 			} else if origSender.RequiresDisambiguation = portal.checkConfusableName(ctx, sender.MXID, memberInfo.Displayname); origSender.RequiresDisambiguation {
 				origSender.DisambiguatedName = fmt.Sprintf("%s (%s)", memberInfo.Displayname, sender.MXID)
 			} else {
@@ -810,7 +811,8 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 	case event.StatePowerLevels:
 		return portal.handleMatrixPowerLevels(ctx, login, origSender, evt, isStateRequest)
 	case event.BeeperDeleteChat:
-		return portal.handleMatrixDeleteChat(ctx, login, origSender, evt)
+		portal.Log.Info().Msg("Ignoring m.beeper.delete_chat event")
+		return EventHandlingResultIgnored
 	case event.BeeperAcceptMessageRequest:
 		return portal.handleMatrixAcceptMessageRequest(ctx, login, origSender, evt)
 	default:
@@ -2513,7 +2515,8 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 	case RemoteEventChatResync:
 		res = portal.handleRemoteChatResync(ctx, source, evt.(RemoteChatResync))
 	case RemoteEventChatDelete:
-		res = portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
+		log.Info().Msg("Ignoring remote chat delete event...")
+		//portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
 	case RemoteEventBackfill:
 		res = portal.handleRemoteBackfill(ctx, source, evt.(RemoteBackfill))
 	default:
@@ -3470,6 +3473,10 @@ func (portal *Portal) handleRemoteReactionRemove(ctx context.Context, source *Us
 
 func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *UserLogin, evt RemoteMessageRemove) EventHandlingResult {
 	log := zerolog.Ctx(ctx)
+	if !portal.Bridge.Config.DeleteMessages {
+		log.Info().Msg("Ignoring remote message remove event because delete messages are disabled")
+		return EventHandlingResultIgnored
+	}
 	targetParts, err := portal.Bridge.DB.Message.GetAllPartsByID(ctx, portal.Receiver, evt.GetTargetMessage())
 	if err != nil {
 		log.Err(err).Msg("Failed to get target message for removal")
@@ -4257,6 +4264,12 @@ func (portal *Portal) sendStateWithIntentOrBot(ctx context.Context, sender Matri
 	if sender == nil {
 		sender = portal.Bridge.Bot
 	}
+
+	if !portal.Bridge.Config.RenameRoom && eventType == event.StateRoomName {
+		zerolog.Ctx(ctx).Info().Msg("Ignoring room name change event")
+		return
+	}
+
 	resp, err = sender.SendState(ctx, portal.MXID, eventType, stateKey, content, ts)
 	if errors.Is(err, mautrix.MForbidden) && sender != portal.Bridge.Bot {
 		if content.Raw == nil {
@@ -4799,6 +4812,27 @@ func (portal *Portal) UpdateDisappearingSetting(
 	return true
 }
 
+func (br *Bridge) UpdateSetRelayFromUser(
+	ctx context.Context, loginID string,
+) error {
+	if loginID == "" {
+		return fmt.Errorf("userLoginID is empty")
+	}
+	br.cacheLock.Lock()
+	defer br.cacheLock.Unlock()
+	err := br.DB.Portal.UpdateSetRelayFromUser(ctx, loginID)
+
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update relay login ID from user")
+	} else {
+		zerolog.Ctx(ctx).Info().Str(
+			"user_login_id", loginID,
+		).Msg("Updated relay login ID from user, cleared portal cache")
+	}
+
+	return err
+}
+
 func (portal *Portal) updateParent(ctx context.Context, newParentID networkid.PortalID, source *UserLogin) bool {
 	newParent := networkid.PortalKey{ID: newParentID}
 	if portal.Bridge.Config.SplitPortals {
@@ -5053,6 +5087,7 @@ func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLo
 		IsDirect:           portal.RoomType == database.RoomTypeDM,
 		PowerLevelOverride: powerLevels,
 		BeeperLocalRoomID:  portal.Bridge.Matrix.GenerateDeterministicRoomID(portal.PortalKey),
+		RoomVersion:        id.RoomV11,
 	}
 	autoJoinInvites := portal.Bridge.Matrix.GetCapabilities().AutoJoinInvites
 	if autoJoinInvites {

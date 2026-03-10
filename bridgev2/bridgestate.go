@@ -17,9 +17,9 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/exfmt"
 
-	"maunium.net/go/mautrix/bridgev2/status"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/format"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/status"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/format"
 )
 
 var CatchBridgeStateQueuePanics = true

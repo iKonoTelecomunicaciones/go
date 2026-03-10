@@ -22,10 +22,10 @@ import (
 	"go.mau.fi/util/exstrings"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/federation/pdu"
-	"maunium.net/go/mautrix/federation/signutil"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/federation/pdu"
+	"github.com/iKonoTelecomunicaciones/go/federation/signutil"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type AuthFailError struct {
@@ -310,7 +310,7 @@ func authorizeMember(roomVersion id.RoomVersion, evt, createEvt *pdu.PDU, authEv
 		// 5.1. If there is no state_key property, or no membership property in content, reject.
 		return ErrMemberNotState
 	}
-	authorizedVia := id.UserID(gjson.GetBytes(evt.Content, "authorised_via_users_server").Str)
+	authorizedVia := id.UserID(gjson.GetBytes(evt.Content, "authorized_via_users_server").Str)
 	if authorizedVia != "" {
 		homeserver := authorizedVia.Homeserver()
 		err := evt.VerifySignature(roomVersion, homeserver, getKey)
@@ -484,7 +484,7 @@ func authorizeMember(roomVersion id.RoomVersion, evt, createEvt *pdu.PDU, authEv
 			}
 			return ErrCantLeaveWithoutBeingInRoom
 		}
-		if senderMembership != event.MembershipJoin {
+		if senderMembership != event.MembershipLeave {
 			// 5.5.2. If the sender’s current membership state is not join, reject.
 			return ErrCantKickWithoutBeingInRoom
 		}
