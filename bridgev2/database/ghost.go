@@ -7,12 +7,17 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 
 	"go.mau.fi/util/dbutil"
+	"go.mau.fi/util/exerrors"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
 	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
@@ -20,6 +25,53 @@ type GhostQuery struct {
 	BridgeID networkid.BridgeID
 	MetaType MetaTypeCreator
 	*dbutil.QueryHelper[*Ghost]
+}
+
+type ExtraProfile map[string]json.RawMessage
+
+func (ep *ExtraProfile) Set(key string, value any) error {
+	if key == "displayname" || key == "avatar_url" {
+		return fmt.Errorf("cannot set reserved profile key %q", key)
+	}
+	marshaled, err := canonicaljson.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if *ep == nil {
+		*ep = make(ExtraProfile)
+	}
+	(*ep)[key] = marshaled
+	return nil
+}
+
+func (ep *ExtraProfile) With(key string, value any) *ExtraProfile {
+	exerrors.PanicIfNotNil(ep.Set(key, value))
+	return ep
+}
+
+func canonicalize(data json.RawMessage) json.RawMessage {
+	canonicalized, _ := canonicaljson.Marshal(data)
+	return canonicalized
+}
+
+func (ep *ExtraProfile) CopyTo(dest *ExtraProfile) (changed bool) {
+	if len(*ep) == 0 {
+		return
+	}
+	if *dest == nil {
+		*dest = make(ExtraProfile)
+	}
+	for key, val := range *ep {
+		if key == "displayname" || key == "avatar_url" {
+			continue
+		}
+		existing, exists := (*dest)[key]
+		if !exists || !bytes.Equal(canonicalize(existing), val) {
+			(*dest)[key] = val
+			changed = true
+		}
+	}
+	return
 }
 
 type Ghost struct {
@@ -35,13 +87,14 @@ type Ghost struct {
 	ContactInfoSet bool
 	IsBot          bool
 	Identifiers    []string
+	ExtraProfile   ExtraProfile
 	Metadata       any
 }
 
 const (
 	getGhostBaseQuery = `
 		SELECT bridge_id, id, name, avatar_id, avatar_hash, avatar_mxc,
-		       name_set, avatar_set, contact_info_set, is_bot, identifiers, metadata
+		       name_set, avatar_set, contact_info_set, is_bot, identifiers, extra_profile, metadata
 		FROM ghost
 	`
 	getGhostByIDQuery       = getGhostBaseQuery + `WHERE bridge_id=$1 AND id=$2`
@@ -49,13 +102,14 @@ const (
 	insertGhostQuery        = `
 		INSERT INTO ghost (
 			bridge_id, id, name, avatar_id, avatar_hash, avatar_mxc,
-			name_set, avatar_set, contact_info_set, is_bot, identifiers, metadata
+			name_set, avatar_set, contact_info_set, is_bot, identifiers, extra_profile, metadata
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
 	updateGhostQuery = `
 		UPDATE ghost SET name=$3, avatar_id=$4, avatar_hash=$5, avatar_mxc=$6,
-		                 name_set=$7, avatar_set=$8, contact_info_set=$9, is_bot=$10, identifiers=$11, metadata=$12
+		                 name_set=$7, avatar_set=$8, contact_info_set=$9, is_bot=$10,
+		                 identifiers=$11, extra_profile=$12, metadata=$13
 		WHERE bridge_id=$1 AND id=$2
 	`
 )
@@ -86,7 +140,7 @@ func (g *Ghost) Scan(row dbutil.Scannable) (*Ghost, error) {
 		&g.BridgeID, &g.ID,
 		&g.Name, &g.AvatarID, &avatarHash, &g.AvatarMXC,
 		&g.NameSet, &g.AvatarSet, &g.ContactInfoSet, &g.IsBot,
-		dbutil.JSON{Data: &g.Identifiers}, dbutil.JSON{Data: g.Metadata},
+		dbutil.JSON{Data: &g.Identifiers}, dbutil.JSON{Data: &g.ExtraProfile}, dbutil.JSON{Data: g.Metadata},
 	)
 	if err != nil {
 		return nil, err
@@ -116,6 +170,6 @@ func (g *Ghost) sqlVariables() []any {
 		g.BridgeID, g.ID,
 		g.Name, g.AvatarID, avatarHash, g.AvatarMXC,
 		g.NameSet, g.AvatarSet, g.ContactInfoSet, g.IsBot,
-		dbutil.JSON{Data: &g.Identifiers}, dbutil.JSON{Data: g.Metadata},
+		dbutil.JSON{Data: &g.Identifiers}, dbutil.JSON{Data: g.ExtraProfile}, dbutil.JSON{Data: g.Metadata},
 	}
 }

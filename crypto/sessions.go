@@ -79,7 +79,6 @@ func (account *OlmAccount) NewInboundSessionFrom(senderKey id.Curve25519, cipher
 	if err != nil {
 		return nil, err
 	}
-	_ = account.Internal.RemoveOneTimeKeys(session)
 	return wrapSession(session), nil
 }
 
@@ -117,6 +116,7 @@ type InboundGroupSession struct {
 	MaxMessages      int
 	IsScheduled      bool
 	KeyBackupVersion id.KeyBackupVersion
+	KeySource        id.KeySource
 
 	id id.SessionID
 }
@@ -136,6 +136,7 @@ func NewInboundGroupSession(senderKey id.SenderKey, signingKey id.Ed25519, roomI
 		MaxAge:           maxAge.Milliseconds(),
 		MaxMessages:      maxMessages,
 		IsScheduled:      isScheduled,
+		KeySource:        id.KeySourceDirect,
 	}, nil
 }
 

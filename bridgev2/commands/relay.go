@@ -12,9 +12,13 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
 	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
-var fakeEvtSetRelay = event.Type{Type: "fi.mau.bridge.set_relay", Class: event.StateEventType}
+var (
+	fakeEvtSetRelay = event.Type{Type: "fi.mau.bridge.set_relay", Class: event.StateEventType}
+	fakeEvtPlumb    = event.Type{Type: "fi.mau.bridge.plumb", Class: event.StateEventType}
+)
 
 var CommandSetRelay = &FullHandler{
 	Func: fnSetRelay,
@@ -36,11 +40,12 @@ func fnSetRelay(ce *Event) {
 		return
 	}
 	onlySetDefaultRelays := !ce.User.Permissions.Admin && ce.Bridge.Config.Relay.AdminOnly
+	preferDefaultRelay := ce.Bridge.Config.Relay.PreferDefault && len(ce.Bridge.Config.Relay.DefaultRelays) > 0
 	var relay *bridgev2.UserLogin
 	if len(ce.Args) == 0 && ce.Portal.Receiver == "" {
 		relay = ce.User.GetDefaultLogin()
 		isLoggedIn := relay != nil
-		if onlySetDefaultRelays {
+		if onlySetDefaultRelays || preferDefaultRelay {
 			relay = nil
 		}
 		if relay == nil {
@@ -65,7 +70,11 @@ func fnSetRelay(ce *Event) {
 			}
 			if relay == nil {
 				if isLoggedIn {
-					ce.Reply("You're not allowed to use yourself as relay and none of the default relay users are in the chat")
+					if onlySetDefaultRelays {
+						ce.Reply("You're not allowed to use yourself as relay and none of the default relay users are in the chat")
+					} else {
+						ce.Reply("None of the default relay users are in the chat. If you want to use yourself as the relay, specify your login ID explicitly")
+					}
 				} else {
 					ce.Reply("You're not logged in and none of the default relay users are in the chat")
 				}
@@ -143,14 +152,19 @@ func canManageRelay(ce *Event) bool {
 	return ce.User.Permissions.ManageRelay &&
 		(ce.User.Permissions.Admin ||
 			(ce.Portal.Relay != nil && ce.Portal.Relay.UserMXID == ce.User.MXID) ||
-			hasRelayRoomPermissions(ce))
+			hasRoomPermissions(ce, ce.RoomID, fakeEvtSetRelay))
 }
 
-func hasRelayRoomPermissions(ce *Event) bool {
-	levels, err := ce.Bridge.Matrix.GetPowerLevels(ce.Ctx, ce.RoomID)
+func canPlumb(ce *Event) bool {
+	return ce.User.Permissions.ManageRelay &&
+		(ce.User.Permissions.Admin || hasRoomPermissions(ce, ce.RoomID, fakeEvtPlumb))
+}
+
+func hasRoomPermissions(ce *Event, roomID id.RoomID, evtType event.Type) bool {
+	levels, err := ce.Bridge.Matrix.GetPowerLevels(ce.Ctx, roomID)
 	if err != nil {
 		ce.Log.Err(err).Msg("Failed to check room power levels")
 		return false
 	}
-	return levels.GetUserLevel(ce.User.MXID) >= levels.GetEventLevel(fakeEvtSetRelay)
+	return levels.GetUserLevel(ce.User.MXID) >= levels.GetEventLevel(evtType)
 }

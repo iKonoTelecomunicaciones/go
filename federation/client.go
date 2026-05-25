@@ -12,21 +12,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
+	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/exslices"
 	"go.mau.fi/util/jsontime"
 
 	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
 	"github.com/iKonoTelecomunicaciones/go/federation/signutil"
 	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type Client struct {
 	HTTP       *http.Client
+	ExtHTTP    *http.Client
+	Dialer     *net.Dialer
+	AllowIP    func(net.IP) bool
 	ServerName string
 	UserAgent  string
 	Key        *SigningKey
@@ -34,22 +40,40 @@ type Client struct {
 	ResponseSizeLimit int64
 }
 
-func NewClient(serverName string, key *SigningKey, cache ResolutionCache) *Client {
-	return &Client{
+func NewClient(serverName string, key *SigningKey, cache ResolutionCache, httpSettings exhttp.ClientSettings) *Client {
+	dialer := &net.Dialer{Timeout: httpSettings.DialTimeout}
+	c := &Client{
 		HTTP: &http.Client{
-			Transport: NewServerResolvingTransport(cache),
-			Timeout:   120 * time.Second,
+			Transport: NewServerResolvingTransport(cache, dialer.DialContext, httpSettings),
+			Timeout:   httpSettings.GlobalTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				// Federation requests do not allow redirects.
 				return http.ErrUseLastResponse
 			},
 		},
+		ExtHTTP:    httpSettings.WithDial(dialer.DialContext).Compile(),
+		Dialer:     dialer,
 		UserAgent:  mautrix.DefaultUserAgent,
 		ServerName: serverName,
 		Key:        key,
+		AllowIP:    DefaultAllowIP,
 
 		ResponseSizeLimit: mautrix.DefaultResponseSizeLimit,
 	}
+	c.ExtHTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// External requests (like media download redirects) can redirect further themselves,
+		// but only allow secure URLs.
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("attempted to redirect to non-https URL")
+		}
+		return nil
+	}
+	dialer.ControlContext = c.controlConn
+	return c
+}
+
+func DefaultAllowIP(ip net.IP) bool {
+	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalMulticast()
 }
 
 func (c *Client) Version(ctx context.Context, serverName string) (resp *RespServerVersion, err error) {
@@ -584,11 +608,11 @@ type signableRequest struct {
 }
 
 func (r *signableRequest) Verify(key id.SigningKey, sig string) error {
-	message, err := json.Marshal(r)
+	message, err := canonicaljson.Marshal(r)
 	if err != nil {
 		return fmt.Errorf("failed to marshal data: %w", err)
 	}
-	return signutil.VerifyJSONRaw(key, sig, message)
+	return signutil.VerifyJSONCanonical(key, sig, message)
 }
 
 func (r *signableRequest) Sign(key *SigningKey) (string, error) {

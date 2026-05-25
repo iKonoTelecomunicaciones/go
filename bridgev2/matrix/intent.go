@@ -9,6 +9,7 @@ package matrix
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/bridgeconfig"
 	"github.com/iKonoTelecomunicaciones/go/crypto/attachment"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
 	"github.com/iKonoTelecomunicaciones/go/event"
 	"github.com/iKonoTelecomunicaciones/go/id"
 	"github.com/iKonoTelecomunicaciones/go/pushrules"
@@ -58,10 +60,10 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 	}
 	if (eventType != event.EventReaction || as.Connector.Config.Encryption.MSC4392) && eventType != event.EventRedaction {
 		msgContent, ok := content.Parsed.(*event.MessageEventContent)
-		if ok {
+		if ok && eventType == event.EventMessage {
 			msgContent.AddPerMessageProfileFallback()
 		}
-		if encrypted, err := as.Matrix.StateStore.IsEncrypted(ctx, roomID); err != nil {
+		if encrypted, err := as.Connector.isEncrypted(ctx, roomID); err != nil {
 			return nil, fmt.Errorf("failed to check if room is encrypted: %w", err)
 		} else if encrypted {
 			if as.Connector.Crypto == nil {
@@ -269,7 +271,7 @@ func (as *ASIntent) UploadMedia(ctx context.Context, roomID id.RoomID, data []by
 	}
 	if roomID != "" {
 		var encrypted bool
-		if encrypted, err = as.Matrix.StateStore.IsEncrypted(ctx, roomID); err != nil {
+		if encrypted, err = as.Connector.isEncrypted(ctx, roomID); err != nil {
 			err = fmt.Errorf("failed to check if room is encrypted: %w", err)
 			return
 		} else if encrypted {
@@ -334,7 +336,7 @@ func (as *ASIntent) UploadMediaStream(
 	}
 	if roomID != "" {
 		var encrypted bool
-		if encrypted, err = as.Matrix.StateStore.IsEncrypted(ctx, roomID); err != nil {
+		if encrypted, err = as.Connector.isEncrypted(ctx, roomID); err != nil {
 			err = fmt.Errorf("failed to check if room is encrypted: %w", err)
 			return
 		} else if encrypted {
@@ -468,11 +470,62 @@ func (as *ASIntent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStr
 	return as.Matrix.SetAvatarURL(ctx, parsedAvatarURL)
 }
 
-func (as *ASIntent) SetExtraProfileMeta(ctx context.Context, data any) error {
-	if !as.Connector.SpecVersions.Supports(mautrix.BeeperFeatureArbitraryProfileMeta) {
-		return nil
+func dataToFields(data any) (map[string]json.RawMessage, error) {
+	fields, ok := data.(map[string]json.RawMessage)
+	if ok {
+		return fields, nil
 	}
-	return as.Matrix.BeeperUpdateProfile(ctx, data)
+	d, err := canonicaljson.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal(d, &fields)
+	return fields, err
+}
+
+func marshalField(val any) json.RawMessage {
+	data, _ := canonicaljson.Marshal(val)
+	return data
+}
+
+var nullJSON = json.RawMessage("null")
+
+func (as *ASIntent) SetProfile(ctx context.Context, data any) error {
+	return as.Matrix.UnstableOverwriteProfile(ctx, data)
+}
+
+func (as *ASIntent) SetExtraProfileMeta(ctx context.Context, data any) error {
+	if as.Connector.SpecVersions.Supports(mautrix.BeeperFeatureArbitraryProfileMeta) {
+		return as.Matrix.BeeperUpdateProfile(ctx, data)
+	} else if as.Connector.SpecVersions.Supports(mautrix.FeatureArbitraryProfileFields) && as.Connector.Config.Matrix.GhostExtraProfileInfo {
+		fields, err := dataToFields(data)
+		if err != nil {
+			return fmt.Errorf("failed to marshal fields: %w", err)
+		}
+		currentProfile, err := as.Matrix.GetProfile(ctx, as.Matrix.UserID)
+		if err != nil {
+			return fmt.Errorf("failed to get current profile: %w", err)
+		}
+		for key, val := range fields {
+			existing, ok := currentProfile.Extra[key]
+			if !ok {
+				if bytes.Equal(val, nullJSON) {
+					continue
+				}
+				err = as.Matrix.SetProfileField(ctx, key, val)
+			} else if !bytes.Equal(marshalField(existing), val) {
+				if bytes.Equal(val, nullJSON) {
+					err = as.Matrix.DeleteProfileField(ctx, key)
+				} else {
+					err = as.Matrix.SetProfileField(ctx, key, val)
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("failed to set profile field %q: %w", key, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (as *ASIntent) GetMXID() id.UserID {
@@ -582,7 +635,9 @@ func (as *ASIntent) MarkAsDM(ctx context.Context, roomID id.RoomID, withUser id.
 	}
 	var directChats event.DirectChatsEventContent
 	err := as.Matrix.GetAccountData(ctx, event.AccountDataDirectChats.Type, &directChats)
-	if err != nil {
+	if errors.Is(err, mautrix.MNotFound) {
+		directChats = make(event.DirectChatsEventContent)
+	} else if err != nil {
 		return err
 	}
 	as.directChatsCache = directChats
@@ -723,4 +778,8 @@ func (as *ASIntent) GetEvent(ctx context.Context, roomID id.RoomID, eventID id.E
 	}
 
 	return evt, nil
+}
+
+func (as *ASIntent) GetStateEvent(ctx context.Context, roomID id.RoomID, eventType event.Type, stateKey string) (*event.Event, error) {
+	return as.Matrix.FullStateEvent(ctx, roomID, eventType, stateKey)
 }

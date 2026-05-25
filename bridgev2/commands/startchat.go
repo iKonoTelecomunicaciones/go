@@ -14,7 +14,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog"
 
@@ -38,35 +37,6 @@ var CommandResolveIdentifier = &FullHandler{
 	NetworkAPI:    NetworkAPIImplements[bridgev2.IdentifierResolvingNetworkAPI],
 }
 
-var CommandSyncChat = &FullHandler{
-	Func: func(ce *Event) {
-		login, _, err := ce.Portal.FindPreferredLogin(ce.Ctx, ce.User, false)
-		if err != nil {
-			ce.Log.Err(err).Msg("Failed to find login for sync")
-			ce.Reply("Failed to find login: %v", err)
-			return
-		} else if login == nil {
-			ce.Reply("No login found for sync")
-			return
-		}
-		info, err := login.Client.GetChatInfo(ce.Ctx, ce.Portal)
-		if err != nil {
-			ce.Log.Err(err).Msg("Failed to get chat info for sync")
-			ce.Reply("Failed to get chat info: %v", err)
-			return
-		}
-		ce.Portal.UpdateInfo(ce.Ctx, info, login, nil, time.Time{})
-		ce.React("✅️")
-	},
-	Name: "sync-portal",
-	Help: HelpMeta{
-		Section:     HelpSectionChats,
-		Description: "Sync the current portal room",
-	},
-	RequiresPortal: true,
-	RequiresLogin:  true,
-}
-
 var CommandStartChat = &FullHandler{
 	Func:    fnResolveIdentifier,
 	Name:    "start-chat",
@@ -80,20 +50,23 @@ var CommandStartChat = &FullHandler{
 	NetworkAPI:    NetworkAPIImplements[bridgev2.IdentifierResolvingNetworkAPI],
 }
 
-func getClientForStartingChat[T bridgev2.NetworkAPI](ce *Event, thing string) (*bridgev2.UserLogin, T, []string) {
-	var remainingArgs []string
+func getClientForStartingChat[T bridgev2.NetworkAPI](ce *Event, thing string) (login *bridgev2.UserLogin, api T, remainingArgs []string) {
 	if len(ce.Args) > 1 {
 		remainingArgs = ce.Args[1:]
 	}
-	var login *bridgev2.UserLogin
 	if len(ce.Args) > 0 {
 		login = ce.Bridge.GetCachedUserLoginByID(networkid.UserLoginID(ce.Args[0]))
 	}
 	if login == nil || login.UserMXID != ce.User.MXID {
 		remainingArgs = ce.Args
 		login = ce.User.GetDefaultLogin()
+		if login == nil {
+			ce.Reply("You're not logged in")
+			return
+		}
 	}
-	api, ok := login.Client.(T)
+	var ok bool
+	api, ok = login.Client.(T)
 	if !ok {
 		ce.Reply("This bridge does not support %s", thing)
 	}
@@ -158,8 +131,9 @@ var CommandCreateGroup = &FullHandler{
 		Description: "Create a new group chat for the current Matrix room",
 		Args:        "[_group type_]",
 	},
-	RequiresLogin: true,
-	NetworkAPI:    NetworkAPIImplements[bridgev2.GroupCreatingNetworkAPI],
+	RequiresLogin:      true,
+	NetworkAPI:         NetworkAPIImplements[bridgev2.GroupCreatingNetworkAPI],
+	RequiresEventLevel: event.StateBridge,
 }
 
 func getState[T any](ctx context.Context, roomID id.RoomID, evtType event.Type, provider bridgev2.MatrixConnectorWithArbitraryRoomState) (content T) {
@@ -173,7 +147,9 @@ func getState[T any](ctx context.Context, roomID id.RoomID, evtType event.Type, 
 }
 
 func fnCreateGroup(ce *Event) {
-	ce.Bridge.Matrix.GetCapabilities()
+	if alreadyBridged(ce) {
+		return
+	}
 	login, api, remainingArgs := getClientForStartingChat[bridgev2.GroupCreatingNetworkAPI](ce, "creating group")
 	if api == nil {
 		return
@@ -210,10 +186,16 @@ func fnCreateGroup(ce *Event) {
 			if user, err := ce.Bridge.GetExistingUserByMXID(ce.Ctx, userID); err != nil {
 				ce.Log.Err(err).Stringer("user_id", userID).Msg("Failed to get user for room member")
 			} else if user != nil {
-				// TODO add user logins to participants
-				//for _, login := range user.GetUserLogins() {
-				//	params.Participants = append(params.Participants, login.GetUserID())
-				//}
+				for _, login := range user.GetUserLogins() {
+					nui, ok := login.Client.(bridgev2.NetworkAPIWithUserID)
+					if !ok {
+						continue
+					}
+					loginUserID := nui.GetUserID()
+					if loginUserID != "" && nui.IsLoggedIn() {
+						params.Participants = append(params.Participants, loginUserID)
+					}
+				}
 			}
 		}
 	}
@@ -248,6 +230,98 @@ func fnCreateGroup(ce *Event) {
 		postfix += "\n\nFailed to add some participants:\n" + strings.Join(failedParticipantsStrings, "\n")
 	}
 	ce.Reply("Successfully created group `%s`%s", resp.ID, postfix)
+}
+
+var CommandCreatePortal = &FullHandler{
+	Func: fnCreatePortal,
+	Name: "create-portal",
+	Help: HelpMeta{
+		Section:     HelpSectionChats,
+		Description: "Create a new Matrix room for an existing chat on the remote network",
+		Args:        "[login ID] <chat ID>",
+	},
+}
+
+func getCreatePortalInput(ce *Event, allowRelay, preferRelay bool) (portal *bridgev2.Portal, login *bridgev2.UserLogin, ok bool) {
+	portalID := networkid.PortalID(ce.Args[len(ce.Args)-1])
+	if len(ce.Args) == 2 {
+		loginID := networkid.UserLoginID(ce.Args[0])
+		login = ce.Bridge.GetCachedUserLoginByID(loginID)
+		if login == nil {
+			ce.Reply("No login found with ID %s", format.SafeMarkdownCode(loginID))
+			return
+		} else if login.UserMXID != ce.User.MXID &&
+			!(ce.User.Permissions.Admin || (allowRelay && slices.Contains(ce.Bridge.Config.Relay.DefaultRelays, login.ID))) {
+			ce.Reply("Login %s does not belong to you", format.SafeMarkdownCode(loginID))
+			return
+		}
+	} else if login = ce.User.GetDefaultLogin(); login == nil || preferRelay {
+		if !allowRelay || len(ce.Bridge.Config.Relay.DefaultRelays) == 0 {
+			ce.Reply("You're not logged in")
+			return
+		}
+		for _, relayID := range ce.Bridge.Config.Relay.DefaultRelays {
+			login = ce.Bridge.GetCachedUserLoginByID(relayID)
+			if login != nil {
+				break
+			}
+		}
+		if login == nil {
+			ce.Reply("You're not logged in and none of the default relays were found")
+			return
+		}
+	}
+	if !login.Client.IsLoggedIn() {
+		ce.Reply("Login %s is not logged in", format.SafeMarkdownCode(login.ID))
+		return
+	}
+	var err error
+	portal, err = ce.Bridge.GetExistingPortalByKey(ce.Ctx, networkid.PortalKey{
+		ID:       portalID,
+		Receiver: login.ID,
+	})
+	if err != nil {
+		ce.Log.Err(err).Msg("Failed to get portal")
+		ce.Reply("Failed to get portal")
+	} else if portal == nil {
+		if ce.Command == "create-portal" {
+			ce.Reply("No portal found with ID %s. Try `$cmdprefix filter allow` instead", format.SafeMarkdownCode(portalID))
+		} else {
+			ce.Reply("No portal found with ID %s. You may need to receive a message in the chat first", format.SafeMarkdownCode(portalID))
+		}
+	} else {
+		ok = true
+	}
+	return
+}
+
+func fnCreatePortal(ce *Event) {
+	if len(ce.Args) == 0 || len(ce.Args) > 2 {
+		ce.Reply("Usage: `$cmdprefix create-portal [login ID] <chat ID>`")
+		return
+	}
+	portal, login, ok := getCreatePortalInput(ce, false, false)
+	if !ok {
+		return
+	}
+	if portal.MXID != "" {
+		// TODO allow showing room ID if the user is already in the room, even if they don't have admin permissions
+		if ce.User.Permissions.Admin {
+			ce.Reply("That chat already has a Matrix room at [%s](%s)", portal.Name, portal.MXID.URI().MatrixToURL())
+		} else {
+			ce.Reply("That chat already has a Matrix room")
+		}
+	} else if info, err := login.Client.GetChatInfo(ce.Ctx, portal); err != nil {
+		ce.Log.Err(err).Msg("Failed to get chat info for creating portal")
+		ce.Reply("Failed to get chat info: %v", err)
+	} else if info == nil {
+		ce.Reply("Chat info not found")
+	} else if err = portal.CreateMatrixRoom(ce.Ctx, login, info); err != nil {
+		ce.Log.Err(err).Msg("Failed to create portal room")
+		ce.Reply("Failed to create portal room: %v", err)
+	} else {
+		ce.Reply("Successfully created portal room [%s](%s)", portal.Name, portal.MXID.URI().MatrixToURL())
+	}
 }
 
 var CommandSearch = &FullHandler{
@@ -289,45 +363,4 @@ func fnSearch(ce *Event) {
 		}
 	}
 	ce.Reply("Search results:\n\n%s", strings.Join(resultsString, "\n"))
-}
-
-var CommandMute = &FullHandler{
-	Func:    fnMute,
-	Name:    "mute",
-	Aliases: []string{"unmute"},
-	Help: HelpMeta{
-		Section:     HelpSectionChats,
-		Description: "Mute or unmute a chat on the remote network",
-		Args:        "[duration]",
-	},
-	RequiresPortal: true,
-	RequiresLogin:  true,
-	NetworkAPI:     NetworkAPIImplements[bridgev2.MuteHandlingNetworkAPI],
-}
-
-func fnMute(ce *Event) {
-	_, api, _ := getClientForStartingChat[bridgev2.MuteHandlingNetworkAPI](ce, "muting chats")
-	var mutedUntil int64
-	if ce.Command == "mute" {
-		mutedUntil = -1
-		if len(ce.Args) > 0 {
-			duration, err := time.ParseDuration(ce.Args[0])
-			if err != nil {
-				ce.Reply("Invalid duration: %v", err)
-				return
-			}
-			mutedUntil = time.Now().Add(duration).UnixMilli()
-		}
-	}
-	err := api.HandleMute(ce.Ctx, &bridgev2.MatrixMute{
-		MatrixEventBase: bridgev2.MatrixEventBase[*event.BeeperMuteEventContent]{
-			Content: &event.BeeperMuteEventContent{MutedUntil: mutedUntil},
-			Portal:  ce.Portal,
-		},
-	})
-	if err != nil {
-		ce.Reply("Failed to %s chat: %v", ce.Command, err)
-	} else {
-		ce.React("✅️")
-	}
 }

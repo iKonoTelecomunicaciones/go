@@ -346,22 +346,23 @@ func (store *SQLCryptoStore) PutGroupSession(ctx context.Context, session *Inbou
 		Int("max_messages", session.MaxMessages).
 		Bool("is_scheduled", session.IsScheduled).
 		Stringer("key_backup_version", session.KeyBackupVersion).
+		Stringer("key_source", session.KeySource).
 		Msg("Upserting megolm inbound group session")
 	_, err = store.DB.Exec(ctx, `
 		INSERT INTO crypto_megolm_inbound_session (
 			session_id, sender_key, signing_key, room_id, session, forwarding_chains,
-			ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version, account_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version, key_source, account_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (session_id, account_id) DO UPDATE
 		    SET withheld_code=NULL, withheld_reason=NULL, sender_key=excluded.sender_key, signing_key=excluded.signing_key,
 		        room_id=excluded.room_id, session=excluded.session, forwarding_chains=excluded.forwarding_chains,
 		        ratchet_safety=excluded.ratchet_safety, received_at=excluded.received_at,
 		        max_age=excluded.max_age, max_messages=excluded.max_messages, is_scheduled=excluded.is_scheduled,
-		        key_backup_version=excluded.key_backup_version
+		        key_backup_version=excluded.key_backup_version, key_source=excluded.key_source
 	`,
 		session.ID(), session.SenderKey, session.SigningKey, session.RoomID, sessionBytes, forwardingChains,
 		ratchetSafety, datePtr(session.ReceivedAt), dbutil.NumPtr(session.MaxAge), dbutil.NumPtr(session.MaxMessages),
-		session.IsScheduled, session.KeyBackupVersion, store.AccountID,
+		session.IsScheduled, session.KeyBackupVersion, session.KeySource, store.AccountID,
 	)
 	return err
 }
@@ -374,12 +375,13 @@ func (store *SQLCryptoStore) GetGroupSession(ctx context.Context, roomID id.Room
 	var maxAge, maxMessages sql.NullInt64
 	var isScheduled bool
 	var version id.KeyBackupVersion
+	var keySource id.KeySource
 	err := store.DB.QueryRow(ctx, `
-		SELECT sender_key, signing_key, session, forwarding_chains, withheld_code, withheld_reason, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version
+		SELECT sender_key, signing_key, session, forwarding_chains, withheld_code, withheld_reason, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version, key_source
 		FROM crypto_megolm_inbound_session
 		WHERE room_id=$1 AND session_id=$2 AND account_id=$3`,
 		roomID, sessionID, store.AccountID,
-	).Scan(&senderKey, &signingKey, &sessionBytes, &forwardingChains, &withheldCode, &withheldReason, &ratchetSafetyBytes, &receivedAt, &maxAge, &maxMessages, &isScheduled, &version)
+	).Scan(&senderKey, &signingKey, &sessionBytes, &forwardingChains, &withheldCode, &withheldReason, &ratchetSafetyBytes, &receivedAt, &maxAge, &maxMessages, &isScheduled, &version, &keySource)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
@@ -410,6 +412,7 @@ func (store *SQLCryptoStore) GetGroupSession(ctx context.Context, roomID id.Room
 		MaxMessages:      int(maxMessages.Int64),
 		IsScheduled:      isScheduled,
 		KeyBackupVersion: version,
+		KeySource:        keySource,
 	}, nil
 }
 
@@ -534,7 +537,8 @@ func (store *SQLCryptoStore) scanInboundGroupSession(rows dbutil.Scannable) (*In
 	var maxAge, maxMessages sql.NullInt64
 	var isScheduled bool
 	var version id.KeyBackupVersion
-	err := rows.Scan(&roomID, &senderKey, &signingKey, &sessionBytes, &forwardingChains, &ratchetSafetyBytes, &receivedAt, &maxAge, &maxMessages, &isScheduled, &version)
+	var keySource id.KeySource
+	err := rows.Scan(&roomID, &senderKey, &signingKey, &sessionBytes, &forwardingChains, &ratchetSafetyBytes, &receivedAt, &maxAge, &maxMessages, &isScheduled, &version, &keySource)
 	if err != nil {
 		return nil, err
 	}
@@ -554,12 +558,13 @@ func (store *SQLCryptoStore) scanInboundGroupSession(rows dbutil.Scannable) (*In
 		MaxMessages:      int(maxMessages.Int64),
 		IsScheduled:      isScheduled,
 		KeyBackupVersion: version,
+		KeySource:        keySource,
 	}, nil
 }
 
 func (store *SQLCryptoStore) GetGroupSessionsForRoom(ctx context.Context, roomID id.RoomID) dbutil.RowIter[*InboundGroupSession] {
 	rows, err := store.DB.Query(ctx, `
-		SELECT room_id, sender_key, signing_key, session, forwarding_chains, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version
+		SELECT room_id, sender_key, signing_key, session, forwarding_chains, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version, key_source
 		FROM crypto_megolm_inbound_session WHERE room_id=$1 AND account_id=$2 AND session IS NOT NULL`,
 		roomID, store.AccountID,
 	)
@@ -568,7 +573,7 @@ func (store *SQLCryptoStore) GetGroupSessionsForRoom(ctx context.Context, roomID
 
 func (store *SQLCryptoStore) GetAllGroupSessions(ctx context.Context) dbutil.RowIter[*InboundGroupSession] {
 	rows, err := store.DB.Query(ctx, `
-		SELECT room_id, sender_key, signing_key, session, forwarding_chains, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version
+		SELECT room_id, sender_key, signing_key, session, forwarding_chains, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version, key_source
 		FROM crypto_megolm_inbound_session WHERE account_id=$1 AND session IS NOT NULL`,
 		store.AccountID,
 	)
@@ -577,7 +582,7 @@ func (store *SQLCryptoStore) GetAllGroupSessions(ctx context.Context) dbutil.Row
 
 func (store *SQLCryptoStore) GetGroupSessionsWithoutKeyBackupVersion(ctx context.Context, version id.KeyBackupVersion) dbutil.RowIter[*InboundGroupSession] {
 	rows, err := store.DB.Query(ctx, `
-		SELECT room_id, sender_key, signing_key, session, forwarding_chains, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version
+		SELECT room_id, sender_key, signing_key, session, forwarding_chains, ratchet_safety, received_at, max_age, max_messages, is_scheduled, key_backup_version, key_source
 		FROM crypto_megolm_inbound_session WHERE account_id=$1 AND session IS NOT NULL AND key_backup_version != $2`,
 		store.AccountID, version,
 	)
@@ -663,13 +668,13 @@ func (store *SQLCryptoStore) IsOutboundGroupSessionShared(ctx context.Context, u
 
 // ValidateMessageIndex returns whether the given event information match the ones stored in the database
 // for the given sender key, session ID and index. If the index hasn't been stored, this will store it.
-func (store *SQLCryptoStore) ValidateMessageIndex(ctx context.Context, senderKey id.SenderKey, sessionID id.SessionID, eventID id.EventID, index uint, timestamp int64) (bool, error) {
+func (store *SQLCryptoStore) ValidateMessageIndex(ctx context.Context, sessionID id.SessionID, eventID id.EventID, index uint, timestamp int64) (bool, error) {
 	if eventID == "" && timestamp == 0 {
 		var notOK bool
 		const validateEmptyQuery = `
-		SELECT EXISTS(SELECT 1 FROM crypto_message_index WHERE sender_key=$1 AND session_id=$2 AND "index"=$3)
+		SELECT EXISTS(SELECT 1 FROM crypto_message_index WHERE session_id=$1 AND "index"=$2)
 		`
-		err := store.DB.QueryRow(ctx, validateEmptyQuery, senderKey, sessionID, index).Scan(&notOK)
+		err := store.DB.QueryRow(ctx, validateEmptyQuery, sessionID, index).Scan(&notOK)
 		if notOK {
 			zerolog.Ctx(ctx).Debug().
 				Uint("message_index", index).
@@ -679,15 +684,15 @@ func (store *SQLCryptoStore) ValidateMessageIndex(ctx context.Context, senderKey
 	}
 
 	const validateQuery = `
-	INSERT INTO crypto_message_index (sender_key, session_id, "index", event_id, timestamp)
-	VALUES ($1, $2, $3, $4, $5)
+	INSERT INTO crypto_message_index (session_id, "index", event_id, timestamp)
+	VALUES ($1, $2, $3, $4)
 	-- have to update something so that RETURNING * always returns the row
-	ON CONFLICT (sender_key, session_id, "index") DO UPDATE SET sender_key=excluded.sender_key
+	ON CONFLICT (session_id, "index") DO UPDATE SET timestamp=crypto_message_index.timestamp
 	RETURNING event_id, timestamp
 	`
 	var expectedEventID id.EventID
 	var expectedTimestamp int64
-	err := store.DB.QueryRow(ctx, validateQuery, senderKey, sessionID, index, eventID, timestamp).Scan(&expectedEventID, &expectedTimestamp)
+	err := store.DB.QueryRow(ctx, validateQuery, sessionID, index, eventID, timestamp).Scan(&expectedEventID, &expectedTimestamp)
 	if err != nil {
 		return false, err
 	} else if expectedEventID != eventID || expectedTimestamp != timestamp {

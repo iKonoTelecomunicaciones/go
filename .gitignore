@@ -2,4 +2,5 @@
 .vscode/
 *.db*
 *.log
-/vendor
+.cursor/plans/
+.claude/settings.local.json

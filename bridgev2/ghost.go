@@ -9,12 +9,17 @@ package bridgev2
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/rs/zerolog"
+	"github.com/tidwall/sjson"
+	"go.mau.fi/util/exerrors"
 	"go.mau.fi/util/exmime"
-	"golang.org/x/exp/slices"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
@@ -134,22 +139,29 @@ func (a *Avatar) Reupload(ctx context.Context, intent MatrixAPI, currentHash [32
 }
 
 type UserInfo struct {
-	Identifiers []string
-	Name        *string
-	Avatar      *Avatar
-	IsBot       *bool
+	Identifiers  []string
+	Name         *string
+	Avatar       *Avatar
+	IsBot        *bool
+	ExtraProfile database.ExtraProfile
 
 	ExtraUpdates ExtraUpdater[*Ghost]
 }
 
-func (ghost *Ghost) UpdateName(ctx context.Context, name string) bool {
+func (ghost *Ghost) prepareName(name string) bool {
 	if ghost.Name == name && ghost.NameSet {
 		return false
 	}
 	ghost.Name = name
 	ghost.NameSet = false
-	err := ghost.Intent.SetDisplayName(ctx, name)
-	if err != nil {
+	return true
+}
+
+func (ghost *Ghost) UpdateName(ctx context.Context, name string) bool {
+	if !ghost.prepareName(name) {
+		return false
+	}
+	if err := ghost.Intent.SetDisplayName(ctx, name); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to set display name")
 	} else {
 		ghost.NameSet = true
@@ -157,9 +169,9 @@ func (ghost *Ghost) UpdateName(ctx context.Context, name string) bool {
 	return true
 }
 
-func (ghost *Ghost) UpdateAvatar(ctx context.Context, avatar *Avatar) bool {
+func (ghost *Ghost) prepareAvatar(ctx context.Context, avatar *Avatar) (changed, mxcChanged bool) {
 	if ghost.AvatarID == avatar.ID && (avatar.Remove || ghost.AvatarMXC != "") && ghost.AvatarSet {
-		return false
+		return false, false
 	}
 	ghost.AvatarID = avatar.ID
 	if !avatar.Remove {
@@ -167,9 +179,9 @@ func (ghost *Ghost) UpdateAvatar(ctx context.Context, avatar *Avatar) bool {
 		if err != nil {
 			ghost.AvatarSet = false
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to reupload avatar")
-			return true
+			return true, false
 		} else if newHash == ghost.AvatarHash && ghost.AvatarMXC != "" && ghost.AvatarSet {
-			return true
+			return true, false
 		}
 		ghost.AvatarHash = newHash
 		ghost.AvatarMXC = newMXC
@@ -177,17 +189,27 @@ func (ghost *Ghost) UpdateAvatar(ctx context.Context, avatar *Avatar) bool {
 		ghost.AvatarMXC = ""
 	}
 	ghost.AvatarSet = false
-	if err := ghost.Intent.SetAvatarURL(ctx, ghost.AvatarMXC); err != nil {
-		zerolog.Ctx(ctx).Err(err).Msg("Failed to set avatar URL")
-	} else {
-		ghost.AvatarSet = true
+	return true, true
+}
+
+func (ghost *Ghost) UpdateAvatar(ctx context.Context, avatar *Avatar) bool {
+	changed, mxcChanged := ghost.prepareAvatar(ctx, avatar)
+	if !changed {
+		return false
+	}
+	if mxcChanged {
+		if err := ghost.Intent.SetAvatarURL(ctx, ghost.AvatarMXC); err != nil {
+			zerolog.Ctx(ctx).Err(err).Msg("Failed to set avatar URL")
+		} else {
+			ghost.AvatarSet = true
+		}
 	}
 	return true
 }
 
-func (ghost *Ghost) getExtraProfileMeta() *event.BeeperProfileExtra {
+func (ghost *Ghost) getExtraProfileMeta() any {
 	bridgeName := ghost.Bridge.Network.GetName()
-	return &event.BeeperProfileExtra{
+	baseExtra := &event.BeeperProfileExtra{
 		RemoteID:     string(ghost.ID),
 		Identifiers:  ghost.Identifiers,
 		Service:      bridgeName.BeeperBridgeType,
@@ -195,25 +217,61 @@ func (ghost *Ghost) getExtraProfileMeta() *event.BeeperProfileExtra {
 		IsBridgeBot:  false,
 		IsNetworkBot: ghost.IsBot,
 	}
+	if len(ghost.ExtraProfile) == 0 {
+		return baseExtra
+	}
+	mergedExtra := maps.Clone(ghost.ExtraProfile)
+	baseExtraMarshaled := exerrors.Must(json.Marshal(baseExtra))
+	exerrors.PanicIfNotNil(json.Unmarshal(baseExtraMarshaled, &mergedExtra))
+	return mergedExtra
 }
 
-func (ghost *Ghost) UpdateContactInfo(ctx context.Context, identifiers []string, isBot *bool) bool {
-	if identifiers != nil {
-		slices.Sort(identifiers)
+func (ghost *Ghost) getFullProfile() json.RawMessage {
+	marshaled := exerrors.Must(json.Marshal(ghost.getExtraProfileMeta()))
+	if ghost.Name != "" {
+		marshaled = exerrors.Must(sjson.SetBytes(marshaled, "displayname", ghost.Name))
 	}
-	if ghost.ContactInfoSet &&
-		(identifiers == nil || slices.Equal(identifiers, ghost.Identifiers)) &&
-		(isBot == nil || *isBot == ghost.IsBot) {
+	if ghost.AvatarMXC != "" {
+		marshaled = exerrors.Must(sjson.SetBytes(marshaled, "avatar_url", ghost.AvatarMXC))
+	}
+	return marshaled
+}
+
+func (ghost *Ghost) prepareContactInfo(identifiers []string, isBot *bool, extraProfile database.ExtraProfile) bool {
+	caps := ghost.Bridge.Matrix.GetCapabilities()
+	if !caps.ExtraProfileMeta && !caps.ReplaceEntireProfile {
+		ghost.ContactInfoSet = false
 		return false
 	}
 	if identifiers != nil {
+		slices.Sort(identifiers)
+		if !ghost.Bridge.Config.PhoneNumbersInProfile {
+			identifiers = slices.DeleteFunc(identifiers, func(id string) bool {
+				return strings.HasPrefix(id, "tel:")
+			})
+		}
+	}
+	changed := extraProfile.CopyTo(&ghost.ExtraProfile)
+	if identifiers != nil {
+		changed = changed || !slices.Equal(identifiers, ghost.Identifiers)
 		ghost.Identifiers = identifiers
 	}
 	if isBot != nil {
+		changed = changed || *isBot != ghost.IsBot
 		ghost.IsBot = *isBot
 	}
-	err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta())
-	if err != nil {
+	if ghost.ContactInfoSet && !changed {
+		return false
+	}
+	ghost.ContactInfoSet = false
+	return true
+}
+
+func (ghost *Ghost) UpdateContactInfo(ctx context.Context, identifiers []string, isBot *bool, extraProfile database.ExtraProfile) bool {
+	if !ghost.prepareContactInfo(identifiers, isBot, extraProfile) {
+		return false
+	}
+	if err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta()); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to set extra profile metadata")
 	} else {
 		ghost.ContactInfoSet = true
@@ -273,26 +331,31 @@ func (ghost *Ghost) updateDMPortals(ctx context.Context) {
 }
 
 func (ghost *Ghost) UpdateInfo(ctx context.Context, info *UserInfo) {
-	update := false
 	oldName := ghost.Name
 	oldAvatar := ghost.AvatarMXC
-	if info.Name != nil {
-		update = ghost.UpdateName(ctx, *info.Name) || update
-	}
+
+	nameChanged := info.Name != nil && ghost.prepareName(*info.Name)
+
+	var avatarChanged, avatarMXCChanged bool
 	if info.Avatar != nil {
-		update = ghost.UpdateAvatar(ctx, info.Avatar) || update
+		avatarChanged, avatarMXCChanged = ghost.prepareAvatar(ctx, info.Avatar)
 	} else if oldAvatar == "" && !ghost.AvatarSet {
 		// Special case: nil avatar means we're not expecting one ever, if we don't currently have
 		// one we flag it as set to avoid constantly refetching in UpdateInfoIfNecessary.
 		ghost.AvatarSet = true
-		update = true
+		avatarChanged = true
 	}
-	if info.Identifiers != nil || info.IsBot != nil {
-		update = ghost.UpdateContactInfo(ctx, info.Identifiers, info.IsBot) || update
+
+	var contactInfoChanged bool
+	if info.Identifiers != nil || info.IsBot != nil || info.ExtraProfile != nil {
+		contactInfoChanged = ghost.prepareContactInfo(info.Identifiers, info.IsBot, info.ExtraProfile)
 	}
+
+	update := nameChanged || avatarChanged || contactInfoChanged
 	if info.ExtraUpdates != nil {
 		update = info.ExtraUpdates(ctx, ghost) || update
 	}
+	ghost.pushProfileChanges(ctx, nameChanged, avatarMXCChanged, contactInfoChanged)
 	if oldName != ghost.Name || oldAvatar != ghost.AvatarMXC {
 		ghost.updateDMPortals(ctx)
 	}
@@ -300,6 +363,43 @@ func (ghost *Ghost) UpdateInfo(ctx context.Context, info *UserInfo) {
 		err := ghost.Bridge.DB.Ghost.Update(ctx, ghost.Ghost)
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to update ghost in database after updating info")
+		}
+	}
+}
+
+func (ghost *Ghost) pushProfileChanges(ctx context.Context, nameChanged, avatarChanged, contactInfoChanged bool) {
+	if !nameChanged && !avatarChanged && !contactInfoChanged {
+		return
+	}
+	if ghost.Bridge.Matrix.GetCapabilities().ReplaceEntireProfile {
+		if err := ghost.Intent.SetProfile(ctx, ghost.getFullProfile()); err != nil {
+			zerolog.Ctx(ctx).Err(err).Msg("Failed to set profile")
+		} else {
+			ghost.NameSet = true
+			ghost.AvatarSet = true
+			ghost.ContactInfoSet = true
+		}
+	} else {
+		if nameChanged {
+			if err := ghost.Intent.SetDisplayName(ctx, ghost.Name); err != nil {
+				zerolog.Ctx(ctx).Err(err).Msg("Failed to set display name")
+			} else {
+				ghost.NameSet = true
+			}
+		}
+		if avatarChanged {
+			if err := ghost.Intent.SetAvatarURL(ctx, ghost.AvatarMXC); err != nil {
+				zerolog.Ctx(ctx).Err(err).Msg("Failed to set avatar URL")
+			} else {
+				ghost.AvatarSet = true
+			}
+		}
+		if contactInfoChanged {
+			if err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta()); err != nil {
+				zerolog.Ctx(ctx).Err(err).Msg("Failed to set extra profile metadata")
+			} else {
+				ghost.ContactInfoSet = true
+			}
 		}
 	}
 }

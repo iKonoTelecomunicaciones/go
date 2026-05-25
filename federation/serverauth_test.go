@@ -8,16 +8,19 @@ package federation_test
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mau.fi/util/exhttp"
 
 	"github.com/iKonoTelecomunicaciones/go/federation"
 )
 
 func TestServerKeyResponse_VerifySelfSignature(t *testing.T) {
-	cli := federation.NewClient("", nil, nil)
+	cli := federation.NewClient("", nil, nil, exhttp.SensibleClientSettings)
+	cli.AllowIP = nil
 	ctx := context.Background()
 	for _, name := range []string{"matrix.org", "maunium.net", "cd.mau.dev", "uwu.mau.dev"} {
 		t.Run(name, func(t *testing.T) {
@@ -26,4 +29,14 @@ func TestServerKeyResponse_VerifySelfSignature(t *testing.T) {
 			assert.NoError(t, resp.VerifySelfSignature())
 		})
 	}
+}
+
+func TestServerKeyResponse_FailWithFilter(t *testing.T) {
+	cli := federation.NewClient("", nil, nil, exhttp.SensibleClientSettings)
+	cli.AllowIP = func(ip net.IP) bool {
+		return false
+	}
+	ctx := context.Background()
+	_, err := cli.ServerKeys(ctx, "matrix.org")
+	assert.ErrorIs(t, err, federation.ErrIPFiltered)
 }

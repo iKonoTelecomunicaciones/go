@@ -15,7 +15,24 @@ import (
 	"strings"
 
 	"go.mau.fi/util/random"
+
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 )
+
+func LoadGlobalConfigEnv() {
+	peb, err := strconv.Atoi(os.Getenv("MAUTRIX_PORTAL_EVENT_BUFFER"))
+	if err == nil && peb >= 0 {
+		bridgev2.PortalEventBuffer = peb
+	}
+	pose, err := strconv.ParseBool(os.Getenv("MAUTRIX_PANIC_ON_STUCK_EVENT"))
+	if err == nil {
+		bridgev2.PanicOnStuckEvent = pose
+	}
+	ehtt, err := strconv.Atoi(os.Getenv("MAUTRIX_EVENT_HANDLING_TIMEOUT_TICKS"))
+	if err == nil && ehtt > 0 {
+		bridgev2.EventHandlingTimeoutTicks = ehtt
+	}
+}
 
 var randomParseFilePrefix = random.String(16) + "READFILE:"
 
@@ -154,7 +171,20 @@ func UpdateConfigFromEnv(cfg, networkData any, prefix string) error {
 			}
 			field.val.SetMapIndex(reflect.ValueOf(mapKeyStr), reflect.ValueOf(parsedVal))
 		} else {
-			field.val.Set(reflect.ValueOf(parsedVal))
+			switch typedVal := parsedVal.(type) {
+			case int64:
+				field.val.SetInt(typedVal)
+			case uint64:
+				field.val.SetUint(typedVal)
+			case float64:
+				field.val.SetFloat(typedVal)
+			case bool:
+				field.val.SetBool(typedVal)
+			case string:
+				field.val.SetString(typedVal)
+			default:
+				return fmt.Errorf("unexpected parsed value type %T", parsedVal)
+			}
 		}
 	}
 	return nil

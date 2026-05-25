@@ -16,6 +16,7 @@ import (
 	ikono "github.com/iKonoTelecomunicaciones/go"
 
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
 	"github.com/iKonoTelecomunicaciones/go/event"
 	"github.com/iKonoTelecomunicaciones/go/id"
 )
@@ -155,6 +156,19 @@ func (ul *UserLogin) GetSpaceRoom(ctx context.Context) (id.RoomID, error) {
 					URL: netName.NetworkIcon,
 				},
 			},
+		}, {
+			Type: event.StateBridge,
+			Content: event.Content{
+				Parsed: &event.BridgeEventContent{
+					BridgeBot: ul.Bridge.Bot.GetMXID(),
+					Protocol:  netName.AsBridgeInfoSection(),
+					Channel: event.BridgeInfoSection{
+						ID:       "__personal_filtering_space__",
+						Receiver: string(ul.ID),
+					},
+					BeeperRoomTypeV2: "personal_filtering_space",
+				},
+			},
 		}},
 		CreationContent: map[string]any{
 			"type": event.RoomTypeSpace,
@@ -165,8 +179,11 @@ func (ul *UserLogin) GetSpaceRoom(ctx context.Context) (id.RoomID, error) {
 				ul.UserMXID:             50,
 			},
 		},
-		RoomVersion: id.RoomV11,
-		Invite:      []id.UserID{ul.UserMXID},
+		Invite: []id.UserID{ul.UserMXID},
+		BeeperLocalRoomID: ul.Bridge.Matrix.GenerateDeterministicRoomID(networkid.PortalKey{
+			ID:       "__personal_filtering_space__",
+			Receiver: ul.ID,
+		}),
 	}
 	if autoJoin {
 		req.BeeperInitialMembers = []id.UserID{ul.UserMXID}

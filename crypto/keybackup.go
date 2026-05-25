@@ -74,8 +74,10 @@ func (mach *OlmMachine) GetAndVerifyLatestKeyBackupVersion(ctx context.Context, 
 		return nil, fmt.Errorf("no signature from user %s found in key backup", mach.Client.UserID)
 	}
 
-	crossSigningPubkeys := mach.GetOwnCrossSigningPublicKeys(ctx)
-	if crossSigningPubkeys == nil {
+	crossSigningPubkeys, err := mach.GetOwnCrossSigningPublicKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get own cross-signing public keys: %w", err)
+	} else if crossSigningPubkeys == nil {
 		return nil, ErrCrossSigningPubkeysNotCached
 	}
 
@@ -200,13 +202,14 @@ func (mach *OlmMachine) ImportRoomKeyFromBackupWithoutSaving(
 		SigningKey:       keyBackupData.SenderClaimedKeys.Ed25519,
 		SenderKey:        keyBackupData.SenderKey,
 		RoomID:           roomID,
-		ForwardingChains: append(keyBackupData.ForwardingKeyChain, keyBackupData.SenderKey.String()),
+		ForwardingChains: keyBackupData.ForwardingKeyChain,
 		id:               sessionID,
 
 		ReceivedAt:       time.Now().UTC(),
 		MaxAge:           maxAge.Milliseconds(),
 		MaxMessages:      maxMessages,
 		KeyBackupVersion: version,
+		KeySource:        id.KeySourceBackup,
 	}, nil
 }
 

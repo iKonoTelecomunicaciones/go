@@ -93,6 +93,30 @@ func DefaultPillConverter(displayname, mxid, eventID string, ctx Context) string
 	}
 }
 
+func onlyBacktickCount(line string) (count int) {
+	for i := 0; i < len(line); i++ {
+		if line[i] != '`' {
+			return -1
+		}
+		count++
+	}
+	return
+}
+
+func DefaultMonospaceBlockConverter(code, language string, ctx Context) string {
+	if len(code) == 0 || code[len(code)-1] != '\n' {
+		code += "\n"
+	}
+	fence := "```"
+	for line := range strings.SplitSeq(code, "\n") {
+		count := onlyBacktickCount(strings.TrimSpace(line))
+		if count >= len(fence) {
+			fence = strings.Repeat("`", count+1)
+		}
+	}
+	return fmt.Sprintf("%s%s\n%s%s", fence, language, code, fence)
+}
+
 // HTMLParser is a somewhat customizable Matrix HTML parser.
 type HTMLParser struct {
 	PillConverter           PillConverter
@@ -243,7 +267,7 @@ func (parser *HTMLParser) spanToString(node *html.Node, ctx Context) string {
 			}
 		}
 	}
-	if parser.ColorConverter != nil {
+	if parser.ColorConverter != nil && (node.Data == "span" || node.Data == "font") {
 		fg := parser.getAttribute(node, "data-mx-color")
 		if len(fg) == 0 && node.Data == "font" {
 			fg = parser.getAttribute(node, "color")
@@ -322,7 +346,7 @@ func (parser *HTMLParser) tagToString(node *html.Node, ctx Context) string {
 		return parser.Newline
 	case "b", "strong", "i", "em", "s", "strike", "del", "u", "ins", "tt", "code":
 		return parser.basicFormatToString(node, ctx)
-	case "span", "font":
+	case "span", "div", "font":
 		return parser.spanToString(node, ctx)
 	case "a":
 		return parser.linkToString(node, ctx)
@@ -348,10 +372,7 @@ func (parser *HTMLParser) tagToString(node *html.Node, ctx Context) string {
 		if parser.MonospaceBlockConverter != nil {
 			return parser.MonospaceBlockConverter(preStr, language, ctx)
 		}
-		if len(preStr) == 0 || preStr[len(preStr)-1] != '\n' {
-			preStr += "\n"
-		}
-		return fmt.Sprintf("```%s\n%s```", language, preStr)
+		return DefaultMonospaceBlockConverter(preStr, language, ctx)
 	default:
 		return parser.nodeToTagAwareString(node.FirstChild, ctx)
 	}

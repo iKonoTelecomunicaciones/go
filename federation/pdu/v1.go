@@ -21,6 +21,7 @@ import (
 	"github.com/tidwall/gjson"
 	"go.mau.fi/util/ptr"
 
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
 	"github.com/iKonoTelecomunicaciones/go/event"
 	"github.com/iKonoTelecomunicaciones/go/federation/signutil"
 	"github.com/iKonoTelecomunicaciones/go/id"
@@ -118,7 +119,7 @@ func (pdu *RoomV1PDU) GetReferenceHash(roomVersion id.RoomVersion) ([32]byte, er
 			return [32]byte{}, err
 		}
 	}
-	rawJSON, err := marshalCanonical(pdu.Clone().RedactForSignature(roomVersion))
+	rawJSON, err := canonicaljson.Marshal(pdu.Clone().RedactForSignature(roomVersion))
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("failed to marshal redacted PDU to calculate event ID: %w", err)
 	}
@@ -133,7 +134,7 @@ func (pdu *RoomV1PDU) CalculateContentHash() ([32]byte, error) {
 	pduClone.Signatures = nil
 	pduClone.Unsigned = nil
 	pduClone.Hashes = nil
-	rawJSON, err := marshalCanonical(pduClone)
+	rawJSON, err := canonicaljson.Marshal(pduClone)
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("failed to marshal PDU to calculate content hash: %w", err)
 	}
@@ -176,7 +177,7 @@ func (pdu *RoomV1PDU) Sign(roomVersion id.RoomVersion, serverName string, keyID 
 	if err != nil {
 		return err
 	}
-	rawJSON, err := marshalCanonical(pdu.Clone().RedactForSignature(roomVersion))
+	rawJSON, err := canonicaljson.Marshal(pdu.Clone().RedactForSignature(roomVersion))
 	if err != nil {
 		return fmt.Errorf("failed to marshal redacted PDU to sign: %w", err)
 	}
@@ -195,7 +196,7 @@ func (pdu *RoomV1PDU) VerifySignature(roomVersion id.RoomVersion, serverName str
 	if !pdu.SupportsRoomVersion(roomVersion) {
 		return fmt.Errorf("RoomV1PDU.VerifySignature: unsupported room version %s", roomVersion)
 	}
-	rawJSON, err := marshalCanonical(pdu.Clone().RedactForSignature(roomVersion))
+	rawJSON, err := canonicaljson.Marshal(pdu.Clone().RedactForSignature(roomVersion))
 	if err != nil {
 		return fmt.Errorf("failed to marshal redacted PDU to verify signature: %w", err)
 	}
@@ -207,7 +208,7 @@ func (pdu *RoomV1PDU) VerifySignature(roomVersion id.RoomVersion, serverName str
 			return fmt.Errorf("failed to get key %s for %s: %w", keyID, serverName, err)
 		} else if key == "" {
 			return fmt.Errorf("key %s not found for %s", keyID, serverName)
-		} else if err = signutil.VerifyJSONRaw(key, sig, rawJSON); err != nil {
+		} else if err = signutil.VerifyJSONCanonical(key, sig, rawJSON); err != nil {
 			return fmt.Errorf("failed to verify signature from key %s: %w", keyID, err)
 		} else {
 			verified = true

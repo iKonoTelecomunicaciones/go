@@ -8,10 +8,14 @@ package federation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
+	"syscall"
+
+	"go.mau.fi/util/exhttp"
 )
 
 // ServerResolvingTransport is an http.RoundTripper that resolves Matrix server names before sending requests.
@@ -19,7 +23,7 @@ import (
 type ServerResolvingTransport struct {
 	ResolveOpts *ResolveServerNameOpts
 	Transport   *http.Transport
-	Dialer      *net.Dialer
+	DialFunc    exhttp.DialerFunc
 
 	cache ResolutionCache
 
@@ -27,18 +31,16 @@ type ServerResolvingTransport struct {
 	resolveLocksLock sync.Mutex
 }
 
-func NewServerResolvingTransport(cache ResolutionCache) *ServerResolvingTransport {
+func NewServerResolvingTransport(cache ResolutionCache, dialer exhttp.DialerFunc, settings exhttp.ClientSettings) *ServerResolvingTransport {
 	if cache == nil {
 		cache = NewInMemoryCache()
 	}
 	srt := &ServerResolvingTransport{
 		resolveLocks: make(map[string]*sync.Mutex),
 		cache:        cache,
-		Dialer:       &net.Dialer{},
+		DialFunc:     dialer,
 	}
-	srt.Transport = &http.Transport{
-		DialContext: srt.DialContext,
-	}
+	srt.Transport = settings.WithDial(srt.DialContext).Configure(&http.Transport{})
 	return srt
 }
 
@@ -49,7 +51,7 @@ func (srt *ServerResolvingTransport) DialContext(ctx context.Context, network, a
 	if !ok {
 		return nil, fmt.Errorf("no IP:port in context")
 	}
-	return srt.Dialer.DialContext(ctx, network, addrs[0])
+	return srt.DialFunc(ctx, network, addrs[0])
 }
 
 func (srt *ServerResolvingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -89,4 +91,26 @@ func (srt *ServerResolvingTransport) resolve(ctx context.Context, serverName str
 		srt.cache.StoreResolution(res)
 		return res, nil
 	}
+}
+
+var ErrIPFiltered = errors.New("refusing to connect")
+
+func (c *Client) controlConn(_ context.Context, network, address string, _ syscall.RawConn) error {
+	switch network {
+	case "tcp4", "tcp6":
+		// ok
+	default:
+		return fmt.Errorf("unsupported network: %s", network)
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("invalid IP address %q", host)
+	} else if c.AllowIP != nil && !c.AllowIP(ip) {
+		return fmt.Errorf("%w to %s", ErrIPFiltered, host)
+	}
+	return nil
 }

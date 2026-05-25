@@ -33,6 +33,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "bridge", "no_bridge_info_state_key")
 	helper.Copy(up.Str|up.Null, "bridge", "bridge_status_notices")
 	helper.Copy(up.Str|up.Int|up.Null, "bridge", "unknown_error_auto_reconnect")
+	helper.Copy(up.Int, "bridge", "unknown_error_max_auto_reconnects")
 	helper.Copy(up.Bool, "bridge", "bridge_matrix_leave")
 	helper.Copy(up.Bool, "bridge", "bridge_notices")
 	helper.Copy(up.Bool, "bridge", "tag_only_on_create")
@@ -42,6 +43,8 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "bridge", "cross_room_replies")
 	helper.Copy(up.Bool, "bridge", "revert_failed_state_changes")
 	helper.Copy(up.Bool, "bridge", "kick_matrix_users")
+	helper.Copy(up.Bool, "bridge", "enable_send_state_requests")
+	helper.Copy(up.Bool, "bridge", "phone_numbers_in_profile")
 	helper.Copy(up.Bool, "bridge", "cleanup_on_logout", "enabled")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "private")
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "manual", "relayed")
@@ -53,9 +56,14 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Str, "bridge", "cleanup_on_logout", "bad_credentials", "shared_has_users")
 	helper.Copy(up.Bool, "bridge", "relay", "enabled")
 	helper.Copy(up.Bool, "bridge", "relay", "admin_only")
+	helper.Copy(up.Bool, "bridge", "relay", "prefer_default")
+	helper.Copy(up.Bool, "bridge", "relay", "allow_bridge")
 	helper.Copy(up.List, "bridge", "relay", "default_relays")
 	helper.Copy(up.Map, "bridge", "relay", "message_formats")
 	helper.Copy(up.Str, "bridge", "relay", "displayname_format")
+	helper.Copy(up.Str, "bridge", "portal_create_filter", "mode")
+	helper.Copy(up.List, "bridge", "portal_create_filter", "list")
+	helper.Copy(up.List, "bridge", "portal_create_filter", "always_deny_from_login")
 	helper.Copy(up.Bool, "bridge", "rename_room")
 	helper.Copy(up.Bool, "bridge", "delete_messages")
 	helper.Copy(up.Map, "bridge", "permissions")
@@ -102,6 +110,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "matrix", "sync_direct_chat_list")
 	helper.Copy(up.Bool, "matrix", "federate_rooms")
 	helper.Copy(up.Int, "matrix", "upload_file_threshold")
+	helper.Copy(up.Bool, "matrix", "ghost_extra_profile_info")
 
 	helper.Copy(up.Str|up.Null, "analytics", "token")
 	helper.Copy(up.Str|up.Null, "analytics", "url")
@@ -145,6 +154,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Int, "backfill", "unread_hours_threshold")
 	helper.Copy(up.Int, "backfill", "threads", "max_initial_messages")
 	helper.Copy(up.Bool, "backfill", "queue", "enabled")
+	helper.Copy(up.Bool, "backfill", "queue", "manual")
 	helper.Copy(up.Int, "backfill", "queue", "batch_size")
 	helper.Copy(up.Int, "backfill", "queue", "batch_delay")
 	helper.Copy(up.Int, "backfill", "queue", "max_batches")
@@ -197,6 +207,7 @@ var SpacedBlocks = [][]string{
 	{"bridge", "bridge_matrix_leave"},
 	{"bridge", "cleanup_on_logout"},
 	{"bridge", "relay"},
+	{"bridge", "portal_create_filter"},
 	{"bridge", "permissions"},
 	{"database"},
 	{"homeserver"},

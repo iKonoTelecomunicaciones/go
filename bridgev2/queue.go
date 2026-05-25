@@ -80,13 +80,14 @@ func (br *Bridge) QueueMatrixEvent(ctx context.Context, evt *event.Event) EventH
 		sender, err = br.GetUserByMXID(ctx, evt.Sender)
 		if err != nil {
 			log.Err(err).Msg("Failed to get sender user for incoming Matrix event")
-			status := WrapErrorInStatus(fmt.Errorf("%w: failed to get sender user: %w", ErrDatabaseError, err))
+			err = fmt.Errorf("%w: failed to get sender user: %w", ErrDatabaseError, err)
+			status := WrapErrorInStatus(err)
 			br.Matrix.SendMessageStatus(ctx, &status, StatusEventInfoFromEvent(evt))
-			return EventHandlingResultFailed
+			return EventHandlingResultFailed.WithError(err)
 		} else if sender == nil {
 			log.Error().Msg("Couldn't get sender for incoming non-ephemeral Matrix event")
 			br.Matrix.SendMessageStatus(ctx, &ErrEventSenderUserNotFound, StatusEventInfoFromEvent(evt))
-			return EventHandlingResultFailed
+			return EventHandlingResultFailed.WithError(ErrEventSenderUserNotFound)
 		} else if !sender.Permissions.SendEvents {
 			if !br.rejectInviteOnNoPermission(ctx, evt, "interact with") {
 				br.Matrix.SendMessageStatus(ctx, &ErrNoPermissionToInteract, StatusEventInfoFromEvent(evt))
@@ -128,26 +129,36 @@ func (br *Bridge) QueueMatrixEvent(ctx context.Context, evt *event.Event) EventH
 			err := br.DB.User.Update(ctx, sender.User)
 			if err != nil {
 				log.Err(err).Msg("Failed to clear user's management room in database")
-				return EventHandlingResultFailed
-			} else {
-				log.Debug().Msg("Cleared user's management room due to leave event")
+				return EventHandlingResultFailed.WithError(fmt.Errorf("failed to clear user's management room: %w", err))
 			}
+			log.Debug().Msg("Cleared user's management room due to leave event")
 		}
 		return EventHandlingResultSuccess
 	}
 	portal, err := br.GetPortalByMXID(ctx, evt.RoomID)
 	if err != nil {
 		log.Err(err).Msg("Failed to get portal for incoming Matrix event")
-		status := WrapErrorInStatus(fmt.Errorf("%w: failed to get portal: %w", ErrDatabaseError, err))
+		err = fmt.Errorf("%w: failed to get portal: %w", ErrDatabaseError, err)
+		status := WrapErrorInStatus(err)
 		br.Matrix.SendMessageStatus(ctx, &status, StatusEventInfoFromEvent(evt))
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(err)
 	} else if portal != nil {
 		return portal.queueEvent(ctx, &portalMatrixEvent{
 			evt:    evt,
 			sender: sender,
 		})
-	} else if evt.Type == event.StateMember && br.IsGhostMXID(id.UserID(evt.GetStateKey())) && evt.Content.AsMember().Membership == event.MembershipInvite && evt.Content.AsMember().IsDirect {
+	} else if evt.Type == event.StateMember && br.IsGhostMXID(id.UserID(evt.GetStateKey())) && evt.Content.AsMember().Membership == event.MembershipInvite && evt.Content.AsMember().IsDirect && sender != nil {
 		return br.handleGhostDMInvite(ctx, evt, sender)
+	} else if evt.Type == event.BeeperDeleteChat && sender != nil && sender.Permissions.Admin {
+		err = br.Bot.DeleteRoom(ctx, evt.RoomID, true)
+		if err != nil {
+			log.Err(err).Msg("Failed to delete non-portal room")
+			status := WrapErrorInStatus(err)
+			br.Matrix.SendMessageStatus(ctx, &status, StatusEventInfoFromEvent(evt))
+			return EventHandlingResultFailed.WithError(err)
+		}
+		log.Debug().Msg("Successfully deleted non-portal room after delete chat event")
+		return EventHandlingResultSuccess
 	} else {
 		status := WrapErrorInStatus(ErrNoPortal)
 		br.Matrix.SendMessageStatus(ctx, &status, StatusEventInfoFromEvent(evt))
@@ -243,7 +254,7 @@ func (br *Bridge) QueueRemoteEvent(login *UserLogin, evt RemoteEvent) EventHandl
 			Object("portal_key", key).
 			Bool("uncertain_receiver", isUncertain).
 			Msg("Portal not found to handle remote event")
-		return EventHandlingResultFailed.WithError(ErrPortalNotFoundInEventHandler)
+		return EventHandlingResultIgnored
 	}
 	// TODO put this in a better place, and maybe cache to avoid constant db queries
 	login.MarkInPortal(ctx, portal)

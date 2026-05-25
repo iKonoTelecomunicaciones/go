@@ -7,6 +7,7 @@
 package mediaproxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -75,6 +76,14 @@ func (d *GetMediaResponseData) GetContentType() string {
 
 func (d *GetMediaResponseData) GetContentLength() int64 {
 	return d.ContentLength
+}
+
+func GetMediaResponseRawData(data []byte) *GetMediaResponseData {
+	return &GetMediaResponseData{
+		Reader:        io.NopCloser(bytes.NewReader(data)),
+		ContentType:   http.DetectContentType(data),
+		ContentLength: int64(len(data)),
+	}
 }
 
 type GetMediaResponseCallback struct {
@@ -203,7 +212,7 @@ func (mp *MediaProxy) EnableServerAuth(client *federation.Client, keyCache feder
 	}
 	if client == nil {
 		resCache, _ := keyCache.(federation.ResolutionCache)
-		client = federation.NewClient(mp.serverName, mp.serverKey, resCache)
+		client = federation.NewClient(mp.serverName, mp.serverKey, resCache, exhttp.SensibleClientSettings)
 	}
 	mp.ServerAuth = federation.NewServerAuth(client, keyCache, func(auth federation.XMatrixAuth) string {
 		return mp.GetServerName()
@@ -502,7 +511,7 @@ func doTempFileDownload(
 	}
 	err = respond(tempFile, fileInfo.Size(), mimeType)
 	if err != nil {
-		return true, err
+		return true, fmt.Errorf("failed to write response: %w", err)
 	}
 	return true, nil
 }

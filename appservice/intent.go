@@ -31,6 +31,7 @@ type IntentAPI struct {
 	registerLock sync.Mutex
 
 	IsCustomPuppet bool
+	Registered     bool
 }
 
 func (as *AppService) NewIntentAPI(localpart string) *IntentAPI {
@@ -51,7 +52,7 @@ func (as *AppService) NewIntentAPI(localpart string) *IntentAPI {
 }
 
 func (intent *IntentAPI) Register(ctx context.Context) error {
-	_, err := intent.Client.MakeRequest(ctx, http.MethodPost, intent.BuildClientURL("v3", "register"), &mautrix.ReqRegister{
+	_, err := intent.Client.MakeRequest(ctx, http.MethodPost, intent.BuildClientURL("v3", "register"), &mautrix.ReqRegister[any]{
 		Username:     intent.Localpart,
 		Type:         mautrix.AuthTypeAppservice,
 		InhibitLogin: true,
@@ -60,7 +61,7 @@ func (intent *IntentAPI) Register(ctx context.Context) error {
 }
 
 func (intent *IntentAPI) EnsureRegistered(ctx context.Context) error {
-	if intent.IsCustomPuppet {
+	if intent.IsCustomPuppet || intent.Registered {
 		return nil
 	}
 	intent.registerLock.Lock()
@@ -69,6 +70,7 @@ func (intent *IntentAPI) EnsureRegistered(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to check if user is registered: %w", err)
 	} else if isRegistered {
+		intent.Registered = true
 		return nil
 	}
 
@@ -80,6 +82,7 @@ func (intent *IntentAPI) EnsureRegistered(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to mark user as registered in state store: %w", err)
 	}
+	intent.Registered = true
 	return nil
 }
 
@@ -513,6 +516,27 @@ func (intent *IntentAPI) SetAvatarURL(ctx context.Context, avatarURL id.ContentU
 		}
 	}
 	return intent.Client.SetAvatarURL(ctx, avatarURL)
+}
+
+func (intent *IntentAPI) SetProfileField(ctx context.Context, key string, value any) error {
+	if err := intent.EnsureRegistered(ctx); err != nil {
+		return err
+	}
+	return intent.Client.SetProfileField(ctx, key, value)
+}
+
+func (intent *IntentAPI) UnstableOverwriteProfile(ctx context.Context, data any) (err error) {
+	if err := intent.EnsureRegistered(ctx); err != nil {
+		return err
+	}
+	return intent.Client.UnstableOverwriteProfile(ctx, data)
+}
+
+func (intent *IntentAPI) BeeperUpdateProfile(ctx context.Context, data any) error {
+	if err := intent.EnsureRegistered(ctx); err != nil {
+		return err
+	}
+	return intent.Client.BeeperUpdateProfile(ctx, data)
 }
 
 func (intent *IntentAPI) Whoami(ctx context.Context) (*mautrix.RespWhoami, error) {

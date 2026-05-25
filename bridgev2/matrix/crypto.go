@@ -23,6 +23,7 @@ import (
 	"go.mau.fi/util/dbutil"
 
 	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/beeperstream"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
 	"github.com/iKonoTelecomunicaciones/go/crypto"
@@ -43,11 +44,12 @@ var DuplicateMessageIndex = crypto.ErrDuplicateMessageIndex
 var UnknownMessageIndex = olm.ErrUnknownMessageIndex
 
 type CryptoHelper struct {
-	bridge *Connector
-	client *mautrix.Client
-	mach   *crypto.OlmMachine
-	store  *SQLCryptoStore
-	log    *zerolog.Logger
+	bridge  *Connector
+	client  *mautrix.Client
+	mach    *crypto.OlmMachine
+	store   *SQLCryptoStore
+	log     *zerolog.Logger
+	streams *beeperstream.Helper
 
 	lock       sync.RWMutex
 	syncDone   sync.WaitGroup
@@ -128,7 +130,12 @@ func (helper *CryptoHelper) Init(ctx context.Context) error {
 		}
 	}
 
-	helper.client.Syncer = &cryptoSyncer{helper.mach}
+	streams, err := beeperstream.New(helper.client)
+	if err != nil {
+		return err
+	}
+	helper.streams = streams
+	helper.client.Syncer = &cryptoSyncer{OlmMachine: helper.mach, handleSyncResponse: streams.HandleSyncResponse}
 	helper.client.Store = helper.store
 
 	err = helper.mach.Load(ctx)
@@ -136,7 +143,9 @@ func (helper *CryptoHelper) Init(ctx context.Context) error {
 		return err
 	}
 	if isExistingDevice {
-		if !helper.verifyKeysAreOnServer(ctx) {
+		if ok, err := helper.verifyKeysAreOnServer(ctx); err != nil {
+			return err
+		} else if !ok {
 			return nil
 		}
 	} else {
@@ -147,7 +156,7 @@ func (helper *CryptoHelper) Init(ctx context.Context) error {
 	}
 	if helper.bridge.Config.Encryption.SelfSign {
 		if !helper.doSelfSign(ctx) {
-			os.Exit(34)
+			return ExitError{34}
 		}
 	}
 
@@ -163,7 +172,18 @@ func (helper *CryptoHelper) doSelfSign(ctx context.Context) bool {
 		log.WithLevel(zerolog.FatalLevel).Err(err).Msg("Failed to check verification status")
 		return false
 	}
-	log.Debug().Bool("has_keys", hasKeys).Bool("is_verified", isVerified).Msg("Checked verification status")
+	mkVerified, sskVerified, uskVerified, err := helper.mach.GetOwnCrossSigningVerificationStatus(ctx)
+	if err != nil {
+		log.WithLevel(zerolog.FatalLevel).Err(err).Msg("Failed to check cross-signing key verification status")
+		return false
+	}
+	log.Debug().
+		Bool("has_keys", hasKeys).
+		Bool("device_verified", isVerified).
+		Bool("mk_verified", mkVerified).
+		Bool("usk_verified", uskVerified).
+		Bool("ssk_verified", sskVerified).
+		Msg("Checked verification status")
 	keyInDB := helper.bridge.Bridge.DB.KV.Get(ctx, database.KeyRecoveryKey)
 	if !hasKeys || keyInDB == "overwrite" {
 		if keyInDB != "" && keyInDB != "overwrite" {
@@ -180,7 +200,7 @@ func (helper *CryptoHelper) doSelfSign(ctx context.Context) bool {
 			return false
 		}
 		log.Info().Msg("Generated new recovery key and self-signed bot device")
-	} else if !isVerified {
+	} else if !isVerified || !mkVerified {
 		if keyInDB == "" {
 			log.WithLevel(zerolog.FatalLevel).
 				Msg("Server already has cross-signing keys, but no key in database. Add `recovery_key` to `kv_store`, or set it to `overwrite` to generate new keys.")
@@ -327,7 +347,7 @@ func (helper *CryptoHelper) loginBot(ctx context.Context) (*mautrix.Client, bool
 	return client, deviceID != "", nil
 }
 
-func (helper *CryptoHelper) verifyKeysAreOnServer(ctx context.Context) bool {
+func (helper *CryptoHelper) verifyKeysAreOnServer(ctx context.Context) (bool, error) {
 	helper.log.Debug().Msg("Making sure keys are still on server")
 	resp, err := helper.client.QueryKeys(ctx, &mautrix.ReqQueryKeys{
 		DeviceKeys: map[id.UserID]mautrix.DeviceIDList{
@@ -336,15 +356,14 @@ func (helper *CryptoHelper) verifyKeysAreOnServer(ctx context.Context) bool {
 	})
 	if err != nil {
 		helper.log.WithLevel(zerolog.FatalLevel).Err(err).Msg("Failed to query own keys to make sure device still exists")
-		os.Exit(33)
+		return false, fmt.Errorf("%w: failed to query own keys to make sure device still exists:%w", ExitError{33}, err)
 	}
 	device, ok := resp.DeviceKeys[helper.client.UserID][helper.client.DeviceID]
 	if ok && len(device.Keys) > 0 {
-		return true
+		return true, nil
 	}
 	helper.log.Warn().Msg("Existing device doesn't have keys on server, resetting crypto")
-	helper.Reset(ctx, false)
-	return false
+	return false, helper.Reset(ctx, false)
 }
 
 func (helper *CryptoHelper) Start() {
@@ -352,6 +371,12 @@ func (helper *CryptoHelper) Start() {
 		helper.log.Debug().Msg("End-to-bridge encryption is in appservice mode, registering event listeners and not starting syncer")
 		helper.bridge.AS.Registration.EphemeralEvents = true
 		helper.mach.AddAppserviceListener(helper.bridge.EventProcessor)
+		if helper.streams != nil {
+			err := helper.streams.InitAppservice(helper.bridge.EventProcessor)
+			if err != nil {
+				helper.log.Err(err).Msg("Failed to initialize beeper stream appservice listener")
+			}
+		}
 		return
 	}
 	helper.syncDone.Add(1)
@@ -378,6 +403,9 @@ func (helper *CryptoHelper) Stop() {
 		helper.cancelPeriodicDeleteLoop()
 	}
 	helper.syncDone.Wait()
+	if helper.streams != nil {
+		_ = helper.streams.Close()
+	}
 }
 
 func (helper *CryptoHelper) clearDatabase(ctx context.Context) {
@@ -399,7 +427,7 @@ func (helper *CryptoHelper) clearDatabase(ctx context.Context) {
 	//_, _ = helper.store.DB.Exec("DELETE FROM crypto_cross_signing_signatures")
 }
 
-func (helper *CryptoHelper) Reset(ctx context.Context, startAfterReset bool) {
+func (helper *CryptoHelper) Reset(ctx context.Context, startAfterReset bool) error {
 	helper.lock.Lock()
 	defer helper.lock.Unlock()
 	helper.log.Info().Msg("Resetting end-to-bridge encryption device")
@@ -417,12 +445,13 @@ func (helper *CryptoHelper) Reset(ctx context.Context, startAfterReset bool) {
 	err = helper.Init(ctx)
 	if err != nil {
 		helper.log.WithLevel(zerolog.FatalLevel).Err(err).Msg("Error reinitializing end-to-bridge encryption")
-		os.Exit(50)
+		return ExitError{50}
 	}
 	helper.log.Info().Msg("End-to-bridge encryption successfully reset")
 	if startAfterReset {
 		go helper.Start()
 	}
+	return nil
 }
 
 func (helper *CryptoHelper) Client() *mautrix.Client {
@@ -514,8 +543,16 @@ func (helper *CryptoHelper) ShareKeys(ctx context.Context) error {
 	return helper.mach.ShareKeys(ctx, -1)
 }
 
+func (helper *CryptoHelper) BeeperStreamPublisher() bridgev2.BeeperStreamPublisher {
+	if helper == nil {
+		return nil
+	}
+	return helper.streams
+}
+
 type cryptoSyncer struct {
 	*crypto.OlmMachine
+	handleSyncResponse func(context.Context, *mautrix.RespSync) []*event.Event
 }
 
 func (syncer *cryptoSyncer) ProcessResponse(ctx context.Context, resp *mautrix.RespSync, since string) error {
@@ -533,6 +570,9 @@ func (syncer *cryptoSyncer) ProcessResponse(ctx context.Context, resp *mautrix.R
 		}()
 		syncer.Log.Trace().Str("since", since).Msg("Starting sync response handling")
 		syncer.ProcessSyncResponse(ctx, resp, since)
+		if syncer.handleSyncResponse != nil {
+			syncer.handleSyncResponse(ctx, resp)
+		}
 		syncer.Log.Trace().Str("since", since).Msg("Successfully handled sync response")
 	}()
 	select {

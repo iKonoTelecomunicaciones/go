@@ -10,6 +10,7 @@ import (
 	"context"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exfmt"
 	"go.mau.fi/util/ptr"
 
 	mautrix "github.com/iKonoTelecomunicaciones/go"
@@ -32,15 +33,18 @@ func CreateGroup(ctx context.Context, login *bridgev2.UserLogin, params *bridgev
 	if !ok {
 		return nil, bridgev2.RespError(mautrix.MUnrecognized.WithMessage("This bridge does not support creating groups"))
 	}
+	zerolog.Ctx(ctx).Debug().
+		Any("create_params", params).
+		Msg("Creating group chat on remote network")
 	caps := login.Bridge.Network.GetCapabilities()
 	typeSpec, validType := caps.Provisioning.GroupCreation[params.Type]
 	if !validType {
 		return nil, bridgev2.RespError(mautrix.MUnrecognized.WithMessage("Unrecognized group type %s", params.Type))
 	}
 	if len(params.Participants) < typeSpec.Participants.MinLength {
-		return nil, bridgev2.RespError(mautrix.MInvalidParam.WithMessage("Must have at least %d members", typeSpec.Participants.MinLength))
+		return nil, bridgev2.RespError(mautrix.MInvalidParam.WithMessage("Must have at least %s (in addition to yourself)", exfmt.Pluralizable("member")(typeSpec.Participants.MinLength)))
 	} else if typeSpec.Participants.MaxLength > 0 && len(params.Participants) > typeSpec.Participants.MaxLength {
-		return nil, bridgev2.RespError(mautrix.MInvalidParam.WithMessage("Must have at most %d members", typeSpec.Participants.MaxLength))
+		return nil, bridgev2.RespError(mautrix.MInvalidParam.WithMessage("Must have at most %s", exfmt.Pluralizable("member")(typeSpec.Participants.MaxLength)))
 	}
 	userIDValidatingNetwork, uidValOK := login.Bridge.Network.(bridgev2.IdentifierValidatingNetwork)
 	for i, participant := range params.Participants {
@@ -98,6 +102,9 @@ func CreateGroup(ctx context.Context, login *bridgev2.UserLogin, params *bridgev
 	if resp.PortalKey.IsEmpty() {
 		return nil, ErrNoPortalKey
 	}
+	zerolog.Ctx(ctx).Debug().
+		Object("portal_key", resp.PortalKey).
+		Msg("Successfully created group on remote network")
 	if resp.Portal == nil {
 		resp.Portal, err = login.Bridge.GetPortalByKey(ctx, resp.PortalKey)
 		if err != nil {

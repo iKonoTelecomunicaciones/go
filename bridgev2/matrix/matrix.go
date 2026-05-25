@@ -24,21 +24,30 @@ import (
 )
 
 func (br *Connector) handleRoomEvent(ctx context.Context, evt *event.Event) {
+	if evt.Type == event.StateMember && br.Crypto != nil && !br.Bridge.IsGhostMXID(id.UserID(evt.GetStateKey())) {
+		br.Crypto.HandleMemberEvent(ctx, evt)
+	}
 	if br.shouldIgnoreEvent(evt) {
 		return
 	}
 	if !br.Config.Bridge.Permissions.Get(evt.Sender).SendEvents && evt.Type != event.StateMember {
-		zerolog.Ctx(ctx).Debug().Msg("Dropping event from user with no permission to send events")
+		zerolog.Ctx(ctx).Debug().
+			Stringer("event_type", evt.Type).
+			Stringer("room_id", evt.RoomID).
+			Stringer("sender", evt.Sender).
+			Stringer("event_id", evt.ID).
+			Msg("Dropping event from user with no permission to send events")
 		br.SendMessageStatus(ctx, &bridgev2.ErrNoPermissionToInteract, bridgev2.StatusEventInfoFromEvent(evt))
 		return
 	}
 	if (evt.Type == event.EventMessage || evt.Type == event.EventSticker) && !evt.Mautrix.WasEncrypted && br.Config.Encryption.Require {
-		zerolog.Ctx(ctx).Warn().Msg("Dropping unencrypted event as encryption is configured to be required")
+		zerolog.Ctx(ctx).Warn().
+			Stringer("room_id", evt.RoomID).
+			Stringer("sender", evt.Sender).
+			Stringer("event_id", evt.ID).
+			Msg("Dropping unencrypted event as encryption is configured to be required")
 		br.sendCryptoStatusError(ctx, evt, errMessageNotEncrypted, nil, 0, true)
 		return
-	}
-	if evt.Type == event.StateMember && br.Crypto != nil {
-		br.Crypto.HandleMemberEvent(ctx, evt)
 	}
 	br.Bridge.QueueMatrixEvent(ctx, evt)
 }
@@ -82,7 +91,11 @@ func (br *Connector) handleEncryptedEvent(ctx context.Context, evt *event.Event)
 		Str("session_id", content.SessionID.String()).
 		Logger()
 	if !br.Config.Bridge.Permissions.Get(evt.Sender).SendEvents {
-		log.Debug().Msg("Dropping event from user with no permission to send events")
+		log.Debug().
+			Stringer("room_id", evt.RoomID).
+			Stringer("sender", evt.Sender).
+			Stringer("event_id", evt.ID).
+			Msg("Dropping encrypted event from user with no permission to send events")
 		br.SendMessageStatus(ctx, &bridgev2.ErrNoPermissionToInteract, bridgev2.StatusEventInfoFromEvent(evt))
 		return
 	}
@@ -231,7 +244,6 @@ func (br *Connector) postDecrypt(ctx context.Context, original, decrypted *event
 	go br.sendSuccessCheckpoint(ctx, decrypted, status.MsgStepDecrypted, retryCount)
 	decrypted.Mautrix.CheckpointSent = true
 	decrypted.Mautrix.DecryptionDuration = duration
-	decrypted.Mautrix.EventSource |= event.SourceDecrypted
 	br.EventProcessor.Dispatch(ctx, decrypted)
 	if errorEventID != nil && *errorEventID != "" {
 		_, _ = br.Bot.RedactEvent(ctx, decrypted.RoomID, *errorEventID)

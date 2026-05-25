@@ -12,10 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/exfmt"
@@ -88,19 +90,27 @@ type Portal struct {
 
 	roomCreateLock   sync.Mutex
 	cancelRoomCreate atomic.Pointer[context.CancelFunc]
+	backgroundCtx    context.Context
+	cancelBackground context.CancelFunc
+	deleted          <-chan struct{}
 	RoomCreated      *exsync.Event
 
 	functionalMembersLock  sync.Mutex
 	functionalMembersCache *event.ElementFunctionalMembersContent
 
-	events  chan portalEvent
-	deleted *exsync.Event
+	events chan portalEvent
 
 	eventsLock sync.Mutex
 	eventIdx   int
+
+	backfillLock             sync.Mutex
+	forwardBackfillLock      sync.Mutex
+	nextBackfillDoneCallback func(error)
 }
 
 var PortalEventBuffer = 64
+var PanicOnStuckEvent = false
+var EventHandlingTimeoutTicks = 10
 
 func (br *Bridge) loadPortal(ctx context.Context, dbPortal *database.Portal, queryErr error, key *networkid.PortalKey) (*Portal, error) {
 	if queryErr != nil {
@@ -128,8 +138,9 @@ func (br *Bridge) loadPortal(ctx context.Context, dbPortal *database.Portal, que
 		outgoingMessages:      make(map[networkid.TransactionID]*outgoingMessage),
 
 		RoomCreated: exsync.NewEvent(),
-		deleted:     exsync.NewEvent(),
 	}
+	portal.backgroundCtx, portal.cancelBackground = context.WithCancel(br.BackgroundCtx)
+	portal.deleted = portal.backgroundCtx.Done()
 	if portal.MXID != "" {
 		portal.RoomCreated.Set()
 	}
@@ -169,7 +180,10 @@ func (br *Bridge) loadPortal(ctx context.Context, dbPortal *database.Portal, que
 }
 
 func (portal *Portal) updateLogger() {
-	logWith := portal.Bridge.Log.With().Str("portal_id", string(portal.ID))
+	logWith := portal.Bridge.Log.With().
+		Str("portal_id", string(portal.ID)).
+		Str("portal_receiver", string(portal.Receiver)).
+		Str("portal_pointer", strconv.FormatUint(uint64(uintptr(unsafe.Pointer(portal))), 16))
 	if portal.MXID != "" {
 		logWith = logWith.Stringer("portal_mxid", portal.MXID)
 	}
@@ -337,7 +351,7 @@ func (br *Bridge) GetExistingPortalByKey(ctx context.Context, key networkid.Port
 }
 
 func (portal *Portal) queueEvent(ctx context.Context, evt portalEvent) EventHandlingResult {
-	if portal.deleted.IsSet() {
+	if portal.backgroundCtx.Err() != nil {
 		return EventHandlingResultIgnored
 	}
 	if PortalEventBuffer == 0 {
@@ -352,7 +366,7 @@ func (portal *Portal) queueEvent(ctx context.Context, evt portalEvent) EventHand
 		select {
 		case portal.events <- evt:
 			return EventHandlingResultQueued
-		case <-portal.deleted.GetChan():
+		case <-portal.deleted:
 			return EventHandlingResultIgnored
 		default:
 			zerolog.Ctx(ctx).Error().
@@ -362,6 +376,8 @@ func (portal *Portal) queueEvent(ctx context.Context, evt portalEvent) EventHand
 				select {
 				case portal.events <- evt:
 					return EventHandlingResultQueued
+				case <-portal.deleted:
+					return EventHandlingResultIgnored
 				case <-time.After(5 * time.Second):
 					zerolog.Ctx(ctx).Error().
 						Str("portal_id", string(portal.ID)).
@@ -374,11 +390,10 @@ func (portal *Portal) queueEvent(ctx context.Context, evt portalEvent) EventHand
 
 func (portal *Portal) eventLoop() {
 	if cfg := portal.Bridge.Network.GetCapabilities().OutgoingMessageTimeouts; cfg != nil {
-		ctx, cancel := context.WithCancel(portal.Log.WithContext(portal.Bridge.BackgroundCtx))
+		ctx, cancel := context.WithCancel(portal.Log.WithContext(portal.backgroundCtx))
 		go portal.pendingMessageTimeoutLoop(ctx, cfg)
 		defer cancel()
 	}
-	deleteCh := portal.deleted.GetChan()
 	for i := 0; ; i++ {
 		select {
 		case rawEvt := <-portal.events:
@@ -390,7 +405,7 @@ func (portal *Portal) eventLoop() {
 			} else {
 				portal.handleSingleEventWithDelayLogging(i, rawEvt)
 			}
-		case <-deleteCh:
+		case <-portal.deleted:
 			return
 		}
 	}
@@ -403,9 +418,12 @@ func (portal *Portal) handleSingleEventWithDelayLogging(idx int, rawEvt any) (ou
 	var backgrounded atomic.Bool
 	start := time.Now()
 	var handleDuration time.Duration
-	// Note: this will not set the success flag if the handler times out
-	outerRes = EventHandlingResult{Queued: true}
+	// Note: this will assume success if the handler times out
+	outerRes = EventHandlingResult{Queued: true, Success: true, Error: ErrHandlerBackgrounded}
 	go portal.handleSingleEvent(ctx, rawEvt, func(res EventHandlingResult) {
+		if res.Error != nil && portal.backgroundCtx.Err() != nil {
+			res = EventHandlingResultIgnored
+		}
 		outerRes = res
 		handleDuration = time.Since(start)
 		close(doneCh)
@@ -419,7 +437,7 @@ func (portal *Portal) handleSingleEventWithDelayLogging(idx int, rawEvt any) (ou
 	tick := time.NewTicker(30 * time.Second)
 	_, isCreate := rawEvt.(*portalCreateEvent)
 	defer tick.Stop()
-	for i := 0; i < 10; i++ {
+	for i := 0; i < EventHandlingTimeoutTicks; i++ {
 		select {
 		case <-doneCh:
 			if i > 0 {
@@ -439,10 +457,30 @@ func (portal *Portal) handleSingleEventWithDelayLogging(idx int, rawEvt any) (ou
 			}
 		}
 	}
+	backgrounded.Store(true)
+	if PanicOnStuckEvent {
+		panic(fmt.Errorf("event handling started at %v is still not finished", start))
+	}
 	log.Warn().
 		Time("started_at", start).
 		Msg("Event handling is taking too long, continuing in background")
-	backgrounded.Store(true)
+	return
+}
+
+type contextKey int
+
+const (
+	contextKeyRemoteEvent contextKey = iota
+	contextKeyMatrixEvent
+)
+
+func GetMatrixEventFromContext(ctx context.Context) (evt *event.Event) {
+	evt, _ = ctx.Value(contextKeyMatrixEvent).(*event.Event)
+	return
+}
+
+func GetRemoteEventFromContext(ctx context.Context) (evt RemoteEvent) {
+	evt, _ = ctx.Value(contextKeyRemoteEvent).(RemoteEvent)
 	return
 }
 
@@ -459,6 +497,10 @@ func (portal *Portal) getEventCtxWithLog(rawEvt any, idx int) context.Context {
 				Stringer("event_id", evt.evt.ID).
 				Stringer("sender", evt.sender.MXID)
 		}
+		ctx := portal.backgroundCtx
+		ctx = context.WithValue(ctx, contextKeyMatrixEvent, evt.evt)
+		ctx = logWith.Logger().WithContext(ctx)
+		return ctx
 	case *portalRemoteEvent:
 		evt.evtType = evt.evt.GetType()
 		logWith = portal.Log.With().Int("event_loop_index", idx).
@@ -484,10 +526,23 @@ func (portal *Portal) getEventCtxWithLog(rawEvt any, idx int) context.Context {
 				logWith = logWith.Int64("remote_stream_order", remoteStreamOrder)
 			}
 		}
+		if remoteMsg, ok := evt.evt.(RemoteEventWithTimestamp); ok {
+			if remoteTimestamp := remoteMsg.GetTimestamp(); !remoteTimestamp.IsZero() {
+				logWith = logWith.Time("remote_timestamp", remoteTimestamp)
+			}
+		}
+		ctx := portal.backgroundCtx
+		ctx = context.WithValue(ctx, contextKeyRemoteEvent, evt.evt)
+		ctx = logWith.Logger().WithContext(ctx)
+		if ctxMut, ok := evt.evt.(RemoteEventWithContextMutation); ok {
+			ctx = ctxMut.MutateContext(ctx)
+		}
+		return ctx
 	case *portalCreateEvent:
 		return evt.ctx
+	default:
+		panic(fmt.Errorf("invalid type %T in getEventCtxWithLog", evt))
 	}
-	return logWith.Logger().WithContext(portal.Bridge.BackgroundCtx)
 }
 
 func (portal *Portal) handleSingleEvent(ctx context.Context, rawEvt any, doneCallback func(res EventHandlingResult)) {
@@ -565,6 +620,9 @@ func (portal *Portal) handleSingleEvent(ctx context.Context, rawEvt any, doneCal
 }
 
 func (portal *Portal) unwrapBeeperSendState(ctx context.Context, evt *event.Event) error {
+	if !portal.Bridge.Config.EnableSendStateRequests {
+		return fmt.Errorf("send state requests are not enabled")
+	}
 	content, ok := evt.Content.Parsed.(*event.BeeperSendStateEventContent)
 	if !ok {
 		return fmt.Errorf("%w: %T", ErrUnexpectedParsedContentType, evt.Content.Parsed)
@@ -619,6 +677,11 @@ func (portal *Portal) FindPreferredLogin(ctx context.Context, user *User, allowR
 		}
 	}
 	if !allowRelay {
+		if len(logins) > 0 {
+			return nil, nil, fmt.Errorf("%w (no logins found that are in portal)", ErrNotLoggedIn)
+		} else if portal.Relay != nil {
+			return nil, nil, fmt.Errorf("%w (relay not allowed for this event)", ErrNotLoggedIn)
+		}
 		return nil, nil, ErrNotLoggedIn
 	}
 	// Portal has relay, use it
@@ -636,7 +699,7 @@ func (portal *Portal) FindPreferredLogin(ctx context.Context, user *User, allowR
 			Msg("No usable user portal rows found, returning random login")
 		return firstLogin, nil, nil
 	} else {
-		return nil, nil, ErrNotLoggedIn
+		return nil, nil, fmt.Errorf("%w (no usable logins found)", ErrNotLoggedIn)
 	}
 }
 
@@ -704,10 +767,11 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 	if err != nil {
 		log.Err(err).Msg("Failed to get user login to handle Matrix event")
 		if errors.Is(err, ErrNotLoggedIn) {
-			shouldSendNotice := evt.Content.AsMessage().MsgType != event.MsgNotice
-			return EventHandlingResultFailed.WithMSSError(
-				WrapErrorInStatus(err).WithMessage("You're not logged in").WithIsCertain(true).WithSendNotice(shouldSendNotice),
-			)
+			shouldSendNotice := evt.Type == event.EventMessage && evt.Content.AsMessage().MsgType != event.MsgNotice
+			return EventHandlingResultFailed.WithMSSError(WrapErrorInStatus(err).
+				WithMessage(fmt.Sprintf("You're %s", err)).
+				WithIsCertain(true).
+				WithSendNotice(shouldSendNotice))
 		} else {
 			return EventHandlingResultFailed.WithMSSError(
 				WrapErrorInStatus(err).WithMessage("Failed to get login to handle event").WithIsCertain(true).WithSendNotice(true),
@@ -724,6 +788,9 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 			User:   sender,
 			UserID: sender.MXID,
 		}
+		log.UpdateContext(func(c zerolog.Context) zerolog.Context {
+			return c.Bool("is_relay", true)
+		})
 
 		memberInfo, err := portal.Bridge.Matrix.GetMemberInfo(ctx, portal.MXID, sender.MXID)
 		if err != nil {
@@ -823,7 +890,7 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 func (portal *Portal) handleMatrixReceipts(ctx context.Context, evt *event.Event) EventHandlingResult {
 	content, ok := evt.Content.Parsed.(*event.ReceiptEventContent)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(fmt.Errorf("%w: %T", ErrUnexpectedParsedContentType, evt.Content.Parsed))
 	}
 	for evtID, receipts := range *content {
 		readReceipts, ok := receipts[event.ReceiptTypeRead]
@@ -923,7 +990,7 @@ func (portal *Portal) callReadReceiptHandler(
 func (portal *Portal) handleMatrixTyping(ctx context.Context, evt *event.Event) EventHandlingResult {
 	content, ok := evt.Content.Parsed.(*event.TypingEventContent)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(fmt.Errorf("%w: %T", ErrUnexpectedParsedContentType, evt.Content.Parsed))
 	}
 	portal.currentlyTypingLock.Lock()
 	defer portal.currentlyTypingLock.Unlock()
@@ -1118,6 +1185,10 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 			return EventHandlingResultIgnored.WithMSSError(ErrIgnoringPollFromRelayedUser)
 		}
 		if !caps.PerMessageProfileRelay {
+			if evt.Type == event.EventSticker {
+				msgContent.MsgType = event.MsgImage
+				evt.Type = event.EventMessage
+			}
 			msgContent, err = portal.Bridge.Config.Relay.FormatMessage(msgContent, origSender)
 			if err != nil {
 				log.Err(err).Msg("Failed to format message for relaying")
@@ -1141,12 +1212,10 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 		voteTo, err = portal.Bridge.DB.Message.GetPartByMXID(ctx, relatesTo.GetReferenceID())
 		if err != nil {
 			log.Err(err).Msg("Failed to get poll target message from database")
-			// TODO send status
-			return EventHandlingResultFailed
+			return EventHandlingResultFailed.WithMSSError(fmt.Errorf("%w: failed to get poll message: %w", ErrDatabaseError, err))
 		} else if voteTo == nil {
 			log.Warn().Stringer("vote_to_id", relatesTo.GetReferenceID()).Msg("Poll target message not found")
-			// TODO send status
-			return EventHandlingResultFailed
+			return EventHandlingResultFailed.WithMSSError(ErrUnknownPoll)
 		}
 	}
 	var replyToID id.EventID
@@ -1429,7 +1498,11 @@ func (portal *Portal) handleMatrixEdit(
 			content.MsgType = event.CapMsgSticker
 		}
 	}
-	if origSender != nil {
+	if origSender != nil && !caps.PerMessageProfileRelay {
+		if evt.Type == event.EventSticker {
+			content.MsgType = event.MsgImage
+			evt.Type = event.EventMessage
+		}
 		var err error
 		content, err = portal.Bridge.Config.Relay.FormatMessage(content, origSender)
 		if err != nil {
@@ -1538,6 +1611,12 @@ func (portal *Portal) handleMatrixReaction(ctx context.Context, sender *UserLogi
 	if portal.Bridge.Config.OutgoingMessageReID {
 		deterministicID = portal.Bridge.Matrix.GenerateReactionEventID(portal.MXID, reactionTarget, preResp.SenderID, preResp.EmojiID)
 	}
+	defer func() {
+		// Do this in a defer so that it happens after any potential defer calls to removeOutdatedReaction
+		if handleRes.Success {
+			portal.sendSuccessStatus(ctx, evt, 0, deterministicID)
+		}
+	}()
 	removeOutdatedReaction := func(oldReact *database.Reaction, deleteDB bool) {
 		if !handleRes.Success {
 			return
@@ -1583,6 +1662,10 @@ func (portal *Portal) handleMatrixReaction(ctx context.Context, sender *UserLogi
 			// Keep n-1 previous reactions and remove the rest
 			react.ExistingReactionsToKeep = allReactions[:preResp.MaxReactions-1]
 			for _, oldReaction := range allReactions[preResp.MaxReactions-1:] {
+				if existing != nil && oldReaction.EmojiID == existing.EmojiID {
+					// Don't double-delete on networks that only allow one emoji
+					continue
+				}
 				// Intentionally defer in a loop, there won't be that many items,
 				// and we want all of them to be done after this function completes successfully
 				//goland:noinspection GoDeferInLoop
@@ -1631,7 +1714,6 @@ func (portal *Portal) handleMatrixReaction(ctx context.Context, sender *UserLogi
 	if err != nil {
 		log.Err(err).Msg("Failed to save reaction to database")
 	}
-	portal.sendSuccessStatus(ctx, evt, 0, deterministicID)
 	return EventHandlingResultSuccess.WithEventID(deterministicID)
 }
 
@@ -1890,7 +1972,9 @@ func (portal *Portal) handleMatrixDeleteChat(
 		log.Err(err).Msg("Failed to delete portal from database")
 		return EventHandlingResultFailed.WithMSSError(err)
 	}
-	err = portal.Bridge.Bot.DeleteRoom(ctx, portal.MXID, false)
+	// The event context has likely been canceled by delete, so use a background context for the delete call
+	noCancelCtx := log.WithContext(portal.Bridge.BackgroundCtx)
+	err = portal.Bridge.Bot.DeleteRoom(noCancelCtx, portal.MXID, false)
 	if err != nil {
 		log.Err(err).Msg("Failed to delete Matrix room")
 		return EventHandlingResultFailed.WithMSSError(err)
@@ -1931,17 +2015,23 @@ func (portal *Portal) handleMatrixMembership(
 		return EventHandlingResultIgnored.WithMSSError(ErrMembershipNotSupported)
 	}
 	targetMXID := id.UserID(*evt.StateKey)
-	isSelf := sender.User.MXID == targetMXID
 	target, err := portal.getTargetUser(ctx, targetMXID)
 	if err != nil {
 		log.Err(err).Msg("Failed to get member event target")
 		return EventHandlingResultFailed.WithMSSError(err)
 	}
 
-	membershipChangeType := MembershipChangeType{From: prevContent.Membership, To: content.Membership, IsSelf: isSelf}
-	if !portal.Bridge.Config.BridgeMatrixLeave && membershipChangeType == Leave {
-		log.Debug().Msg("Dropping leave event")
-		return EventHandlingResultIgnored //.WithMSSError(ErrIgnoringLeaveEvent)
+	membershipChangeType := MembershipChangeType{
+		From:   prevContent.Membership,
+		To:     content.Membership,
+		IsSelf: evt.Sender == targetMXID,
+	}
+	if membershipChangeType.IsSelf && membershipChangeType.To == event.MembershipLeave {
+		sender.inPortalCache.Remove(portal.PortalKey)
+		if !portal.Bridge.Config.BridgeMatrixLeave {
+			log.Debug().Str("prev_membership", string(membershipChangeType.From)).Msg("Dropping leave event")
+			return EventHandlingResultIgnored
+		}
 	}
 	targetGhost, _ := target.(*Ghost)
 	membershipChange := &MatrixMembershipChange{
@@ -2251,6 +2341,11 @@ func (portal *Portal) UpdateMatrixRoomID(
 	} else if oldRoom != "" && params.FailIfMXIDSet {
 		return ErrRoomAlreadyExists
 	}
+	err := portal.Bridge.DB.UserPortal.MarkAllNotInSpace(ctx, portal.PortalKey)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update in_space flag for user portals before updating portal MXID")
+	}
+	portal.removeInPortalCache(ctx)
 	log := zerolog.Ctx(ctx)
 	portal.Bridge.cacheLock.Lock()
 	// Wrap unlock in a sync.OnceFunc because we want to both defer it to catch early returns
@@ -2262,17 +2357,17 @@ func (portal *Portal) UpdateMatrixRoomID(
 		return ErrTargetRoomIsPortal
 	} else if alreadyExists {
 		log.Debug().Msg("Replacement room is already a portal, overwriting")
-		existingPortal.MXID = ""
-		existingPortal.RoomCreated.Clear()
-		err := existingPortal.Save(ctx)
+		err = existingPortal.removeMXID(ctx, true)
 		if err != nil {
 			return fmt.Errorf("failed to clear mxid of existing portal: %w", err)
 		}
-		delete(portal.Bridge.portalsByMXID, portal.MXID)
 	}
 	portal.MXID = newRoomID
 	portal.RoomCreated.Set()
 	portal.Bridge.portalsByMXID[portal.MXID] = portal
+	if oldRoom != "" && portal.Bridge.portalsByMXID[oldRoom] == portal {
+		delete(portal.Bridge.portalsByMXID, oldRoom)
+	}
 	portal.NameSet = false
 	portal.AvatarSet = false
 	portal.TopicSet = false
@@ -2285,7 +2380,7 @@ func (portal *Portal) UpdateMatrixRoomID(
 	unlockCacheLock()
 	portal.updateLogger()
 
-	err := portal.Save(ctx)
+	err = portal.Save(ctx)
 	if err != nil {
 		log.Err(err).Msg("Failed to save portal in UpdateMatrixRoomID")
 		return err
@@ -2318,7 +2413,7 @@ func (portal *Portal) UpdateMatrixRoomID(
 		}
 	}()
 	if params.TombstoneOldRoom && oldRoom != "" {
-		_, err = portal.Bridge.Bot.SendState(ctx, portal.MXID, event.StateTombstone, "", &event.Content{
+		_, err = portal.Bridge.Bot.SendState(ctx, oldRoom, event.StateTombstone, "", &event.Content{
 			Parsed: &event.TombstoneEventContent{
 				Body:            "Room has been replaced.",
 				ReplacementRoom: newRoomID,
@@ -2441,7 +2536,14 @@ func (portal *Portal) handleMatrixRedaction(
 		log.Err(err).Msg("Failed to handle Matrix redaction")
 		return EventHandlingResultFailed.WithMSSError(err)
 	}
-	// TODO delete msg/reaction db row
+	if redactionTargetMsg != nil {
+		err = portal.Bridge.DB.Message.Delete(ctx, redactionTargetMsg.RowID)
+	} else if redactionTargetReaction != nil {
+		err = portal.Bridge.DB.Reaction.Delete(ctx, redactionTargetReaction)
+	}
+	if err != nil {
+		log.Err(err).Msg("Failed to delete redacted event from database")
+	}
 	return EventHandlingResultSuccess.WithMSS()
 }
 
@@ -2449,7 +2551,7 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 	log := zerolog.Ctx(ctx)
 	if portal.MXID == "" {
 		mcp, ok := evt.(RemoteEventThatMayCreatePortal)
-		if !ok || !mcp.ShouldCreatePortal() {
+		if !ok || !mcp.ShouldCreatePortal() || !portal.Bridge.Config.PortalCreateFilter.ShouldAllow(source.ID, portal.PortalKey) {
 			log.Debug().Msg("Dropping event as portal doesn't exist")
 			return EventHandlingResultIgnored
 		}
@@ -2518,7 +2620,7 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 		log.Info().Msg("Ignoring remote chat delete event...")
 		//portal.handleRemoteChatDelete(ctx, source, evt.(RemoteChatDelete))
 	case RemoteEventBackfill:
-		res = portal.handleRemoteBackfill(ctx, source, evt.(RemoteBackfill))
+		res = portal.HandleRemoteBackfill(ctx, source, evt.(RemoteBackfill))
 	default:
 		log.Warn().Msg("Got remote event with unknown type")
 	}
@@ -2704,7 +2806,7 @@ func (portal *Portal) getRelationMeta(
 			log.Err(err).Msg("Failed to get last thread message from database")
 		}
 		if prevThreadEvent == nil {
-			prevThreadEvent = threadRoot
+			prevThreadEvent = ptr.Clone(threadRoot)
 		}
 	}
 	return
@@ -2760,8 +2862,12 @@ func (portal *Portal) sendConvertedMessage(
 		ctx, id, converted, false,
 	)
 	output := make([]*database.Message, 0, len(converted.Parts))
-	allSuccess := true
+	var errorList []error
 	for i, part := range converted.Parts {
+		if ctx.Err() != nil {
+			errorList = append(errorList, ctx.Err())
+			break
+		}
 		portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
 		part.Content.BeeperDisappearingTimer = converted.Disappear.ToEventContent()
 		dbMessage := &database.Message{
@@ -2794,7 +2900,7 @@ func (portal *Portal) sendConvertedMessage(
 			})
 			if err != nil {
 				logContext(log.Err(err)).Str("part_id", string(part.ID)).Msg("Failed to send message part to Matrix")
-				allSuccess = false
+				errorList = append(errorList, fmt.Errorf("failed to send message part to Matrix: %w", err))
 				continue
 			}
 			logContext(log.Debug()).
@@ -2806,7 +2912,7 @@ func (portal *Portal) sendConvertedMessage(
 		err := portal.Bridge.DB.Message.Insert(ctx, dbMessage)
 		if err != nil {
 			logContext(log.Err(err)).Str("part_id", string(part.ID)).Msg("Failed to save message part to database")
-			allSuccess = false
+			errorList = append(errorList, fmt.Errorf("%w: failed to save message part to database: %w", ErrDatabaseError, err))
 		}
 		if converted.Disappear.Type != event.DisappearingTypeNone && !dbMessage.HasFakeMXID() {
 			if converted.Disappear.Type == event.DisappearingTypeAfterSend && converted.Disappear.DisappearAt.IsZero() {
@@ -2824,8 +2930,8 @@ func (portal *Portal) sendConvertedMessage(
 		}
 		output = append(output, dbMessage)
 	}
-	if !allSuccess {
-		return output, EventHandlingResultFailed
+	if len(errorList) > 0 {
+		return output, EventHandlingResultFailed.WithError(errors.Join(errorList...))
 	}
 	return output, EventHandlingResultSuccess
 }
@@ -2957,7 +3063,7 @@ func (portal *Portal) handleRemoteMessage(ctx context.Context, source *UserLogin
 	}
 	intent, ok := portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventMessage)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	ts := getEventTS(evt)
 	converted, err := evt.ConvertMessage(ctx, portal, intent)
@@ -3022,7 +3128,7 @@ func (portal *Portal) handleRemoteEdit(ctx context.Context, source *UserLogin, e
 	}
 	intent, ok := portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventEdit)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	} else if intent.GetMXID() != existing[0].SenderMXID {
 		log.Warn().
 			Stringer("edit_sender_mxid", intent.GetMXID()).
@@ -3060,7 +3166,7 @@ func (portal *Portal) sendConvertedEdit(
 	streamOrder int64,
 ) EventHandlingResult {
 	log := zerolog.Ctx(ctx)
-	allSuccess := true
+	var errorList []error
 	for i, part := range converted.ModifiedParts {
 		if part.Content.Mentions == nil {
 			part.Content.Mentions = &event.Mentions{}
@@ -3096,7 +3202,7 @@ func (portal *Portal) sendConvertedEdit(
 			})
 			if err != nil {
 				log.Err(err).Stringer("part_mxid", part.Part.MXID).Msg("Failed to edit message part")
-				allSuccess = false
+				errorList = append(errorList, fmt.Errorf("failed to edit message part: %w", err))
 				continue
 			} else {
 				log.Debug().
@@ -3111,7 +3217,7 @@ func (portal *Portal) sendConvertedEdit(
 		err := portal.Bridge.DB.Message.Update(ctx, part.Part)
 		if err != nil {
 			log.Err(err).Int64("part_rowid", part.Part.RowID).Msg("Failed to update message part in database")
-			allSuccess = false
+			errorList = append(errorList, fmt.Errorf("%w: failed to update message part in database: %w", ErrDatabaseError, err))
 		}
 	}
 	for _, part := range converted.DeletedParts {
@@ -3125,7 +3231,7 @@ func (portal *Portal) sendConvertedEdit(
 		})
 		if err != nil {
 			log.Err(err).Stringer("part_mxid", part.MXID).Msg("Failed to redact message part deleted in edit")
-			allSuccess = false
+			errorList = append(errorList, fmt.Errorf("failed to redact message part deleted in edit: %w", err))
 		} else {
 			log.Debug().
 				Stringer("redaction_event_id", resp.EventID).
@@ -3136,17 +3242,17 @@ func (portal *Portal) sendConvertedEdit(
 		err = portal.Bridge.DB.Message.Delete(ctx, part.RowID)
 		if err != nil {
 			log.Err(err).Int64("part_rowid", part.RowID).Msg("Failed to delete message part from database")
-			allSuccess = false
+			errorList = append(errorList, fmt.Errorf("%w: failed to delete message part from database: %w", ErrDatabaseError, err))
 		}
 	}
 	if converted.AddedParts != nil {
 		_, res := portal.sendConvertedMessage(ctx, targetID, intent, senderID, converted.AddedParts, ts, streamOrder, nil)
 		if !res.Success {
-			allSuccess = false
+			errorList = append(errorList, res.Error)
 		}
 	}
-	if !allSuccess {
-		return EventHandlingResultFailed
+	if len(errorList) > 0 {
+		return EventHandlingResultFailed.WithError(errors.Join(errorList...))
 	}
 	return EventHandlingResultSuccess
 }
@@ -3341,7 +3447,7 @@ func (portal *Portal) handleRemoteReaction(ctx context.Context, source *UserLogi
 	ts := getEventTS(evt)
 	intent, ok := portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventReaction)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	var extra map[string]any
 	if extraContentProvider, ok := evt.(RemoteReactionWithExtraContent); ok {
@@ -3451,7 +3557,7 @@ func (portal *Portal) handleRemoteReactionRemove(ctx context.Context, source *Us
 		var ok bool
 		intent, ok = portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventReactionRemove)
 		if !ok {
-			return EventHandlingResultFailed
+			return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 		}
 	}
 	ts := getEventTS(evt)
@@ -3500,7 +3606,7 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 
 	intent, ok := portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventMessageRemove)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	if intent == portal.Bridge.Bot && len(targetParts) > 0 {
 		senderIntent, err := portal.getIntentForMXID(ctx, targetParts[0].SenderMXID)
@@ -3520,7 +3626,7 @@ func (portal *Portal) handleRemoteMessageRemove(ctx context.Context, source *Use
 
 func (portal *Portal) redactMessageParts(ctx context.Context, parts []*database.Message, intent MatrixAPI, ts time.Time) EventHandlingResult {
 	log := zerolog.Ctx(ctx)
-	var anyFailed bool
+	var errorList []error
 	for _, part := range parts {
 		if part.HasFakeMXID() {
 			continue
@@ -3532,7 +3638,7 @@ func (portal *Portal) redactMessageParts(ctx context.Context, parts []*database.
 		}, &MatrixSendExtra{Timestamp: ts, MessageMeta: part})
 		if err != nil {
 			log.Err(err).Stringer("part_mxid", part.MXID).Msg("Failed to redact message part")
-			anyFailed = true
+			errorList = append(errorList, err)
 		} else {
 			log.Debug().
 				Stringer("redaction_event_id", resp.EventID).
@@ -3541,8 +3647,8 @@ func (portal *Portal) redactMessageParts(ctx context.Context, parts []*database.
 				Msg("Sent redaction of message part to Matrix")
 		}
 	}
-	if anyFailed {
-		return EventHandlingResultFailed
+	if len(errorList) > 0 {
+		return EventHandlingResultFailed.WithError(errors.Join(errorList...))
 	}
 	return EventHandlingResultSuccess
 }
@@ -3591,7 +3697,7 @@ func (portal *Portal) handleRemoteReadReceipt(ctx context.Context, source *UserL
 	sender := evt.GetSender()
 	intent, ok := portal.GetIntentFor(ctx, sender, source, RemoteEventReadReceipt)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	var addTargetLog func(evt *zerolog.Event) *zerolog.Event
 	if lastTarget == nil {
@@ -3651,7 +3757,7 @@ func (portal *Portal) handleRemoteDeliveryReceipt(ctx context.Context, source *U
 	}
 	intent, ok := portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventDeliveryReceipt)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	log := zerolog.Ctx(ctx)
 	for _, target := range evt.GetReceiptTargets() {
@@ -3687,7 +3793,7 @@ func (portal *Portal) handleRemoteTyping(ctx context.Context, source *UserLogin,
 	}
 	intent, ok := portal.GetIntentFor(ctx, evt.GetSender(), source, RemoteEventTyping)
 	if !ok {
-		return EventHandlingResultFailed
+		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	timeout := evt.GetTimeout()
 	err := intent.MarkTyping(ctx, portal.MXID, typingType, timeout)
@@ -3839,7 +3945,9 @@ func (portal *Portal) handleRemoteChatDelete(ctx context.Context, source *UserLo
 		log.Err(err).Msg("Failed to delete portal from database")
 		return EventHandlingResultFailed.WithError(err)
 	}
-	err = portal.Bridge.Bot.DeleteRoom(ctx, portal.MXID, false)
+	// The event context has likely been canceled by delete, so use a background context for the delete call
+	noCancelCtx := log.WithContext(portal.Bridge.BackgroundCtx)
+	err = portal.Bridge.Bot.DeleteRoom(noCancelCtx, portal.MXID, false)
 	if err != nil {
 		log.Err(err).Msg("Failed to delete Matrix room")
 		return EventHandlingResultFailed.WithError(err)
@@ -3849,13 +3957,18 @@ func (portal *Portal) handleRemoteChatDelete(ctx context.Context, source *UserLo
 	}
 }
 
-func (portal *Portal) handleRemoteBackfill(ctx context.Context, source *UserLogin, backfill RemoteBackfill) (res EventHandlingResult) {
-	//data, err := backfill.GetBackfillData(ctx, portal)
-	//if err != nil {
-	//	zerolog.Ctx(ctx).Err(err).Msg("Failed to get backfill data")
-	//	return
-	//}
-	return
+func (portal *Portal) HandleRemoteBackfill(ctx context.Context, source *UserLogin, backfill RemoteBackfill) EventHandlingResult {
+	if !portal.Bridge.Config.Backfill.Enabled {
+		zerolog.Ctx(ctx).Debug().Msg("Ignoring async backfill event because backfill is disabled")
+		return EventHandlingResultIgnored
+	}
+	data, err := backfill.GetBackfillData(ctx, portal)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to get backfill data")
+		return EventHandlingResultFailed.WithError(err)
+	}
+	portal.Bridge.WakeupBackfillQueue(&ManualBackfill{Source: source, Portal: portal, Data: data})
+	return EventHandlingResultSuccess
 }
 
 type ChatInfoChange struct {
@@ -3992,9 +4105,6 @@ func (plc *PowerLevelOverrides) Apply(actor id.UserID, content *event.PowerLevel
 	if plc == nil || content == nil {
 		return
 	}
-	for evtType, level := range plc.Events {
-		changed = content.EnsureEventLevelAs(actor, evtType, level) || changed
-	}
 	var actorLevel int
 	if actor != "" {
 		actorLevel = content.GetUserLevel(actor)
@@ -4028,6 +4138,9 @@ func (plc *PowerLevelOverrides) Apply(actor id.UserID, content *event.PowerLevel
 	if allowChange(plc.Redact, content.Redact(), actorLevel) {
 		changed = true
 		content.RedactPtr = plc.Redact
+	}
+	for evtType, level := range plc.Events {
+		changed = content.EnsureEventLevelAs(actor, evtType, level) || changed
 	}
 	if plc.Custom != nil {
 		changed = plc.Custom(content) || changed
@@ -4991,13 +5104,15 @@ func (portal *Portal) CreateMatrixRoom(ctx context.Context, source *UserLogin, i
 		}
 		return nil
 	}
-	if portal.deleted.IsSet() {
+	if portal.backgroundCtx.Err() != nil {
 		return ErrPortalIsDeleted
 	}
+	mergedCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	waiter := make(chan struct{})
 	closed := false
 	evt := &portalCreateEvent{
-		ctx:    ctx,
+		ctx:    mergedCtx,
 		source: source,
 		info:   info,
 		cb: func(err error) {
@@ -5009,17 +5124,20 @@ func (portal *Portal) CreateMatrixRoom(ctx context.Context, source *UserLogin, i
 		},
 	}
 	if PortalEventBuffer == 0 {
-		go portal.queueEvent(ctx, evt)
+		go portal.queueEvent(mergedCtx, evt)
 	} else {
 		select {
 		case portal.events <- evt:
-		case <-portal.deleted.GetChan():
+		case <-portal.deleted:
 			return ErrPortalIsDeleted
 		}
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-portal.deleted:
+		// This automatically cancels the merged context too
+		return ErrPortalIsDeleted
 	case <-waiter:
 		return
 	}
@@ -5037,6 +5155,9 @@ func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLo
 			source.MarkInPortal(ctx, portal)
 		}
 		return nil
+	}
+	if cancellableCtx.Err() != nil {
+		return cancellableCtx.Err()
 	}
 	log := zerolog.Ctx(ctx).With().
 		Str("action", "create matrix room").
@@ -5216,7 +5337,7 @@ func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLo
 		}
 		portal.Bridge.WakeupBackfillQueue()
 	}
-	withoutCancelCtx := zerolog.Ctx(ctx).WithContext(portal.Bridge.BackgroundCtx)
+	withoutCancelCtx := zerolog.Ctx(ctx).WithContext(portal.backgroundCtx)
 	if portal.Parent != nil {
 		if portal.Parent.MXID != "" {
 			portal.addToParentSpaceAndSave(ctx, true)
@@ -5257,7 +5378,7 @@ func (portal *Portal) addToUserSpaces(ctx context.Context) {
 		return
 	}
 	log := zerolog.Ctx(ctx)
-	withoutCancelCtx := log.WithContext(portal.Bridge.BackgroundCtx)
+	withoutCancelCtx := log.WithContext(portal.backgroundCtx)
 	if portal.Receiver != "" {
 		login := portal.Bridge.GetCachedUserLoginByID(portal.Receiver)
 		if login != nil {
@@ -5286,7 +5407,7 @@ func (portal *Portal) addToUserSpaces(ctx context.Context) {
 }
 
 func (portal *Portal) Delete(ctx context.Context) error {
-	if portal.deleted.IsSet() {
+	if portal.backgroundCtx.Err() != nil {
 		return nil
 	}
 	portal.removeInPortalCache(ctx)
@@ -5310,18 +5431,32 @@ func (portal *Portal) safeDBDelete(ctx context.Context) error {
 }
 
 func (portal *Portal) RemoveMXID(ctx context.Context) error {
+	return portal.removeMXID(ctx, false)
+}
+
+func (portal *Portal) removeMXID(ctx context.Context, alreadyLocked bool) error {
 	if portal.MXID == "" {
 		return nil
 	}
+	oldMXID := portal.MXID
 	portal.MXID = ""
+	portal.Relay = nil
+	portal.RelayLoginID = ""
 	portal.RoomCreated.Clear()
 	err := portal.Save(ctx)
 	if err != nil {
 		return err
 	}
-	portal.Bridge.cacheLock.Lock()
-	defer portal.Bridge.cacheLock.Unlock()
-	delete(portal.Bridge.portalsByMXID, portal.MXID)
+	err = portal.Bridge.DB.UserPortal.MarkAllNotInSpace(ctx, portal.PortalKey)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update in_space flag for user portals after removing portal MXID")
+	}
+	portal.removeInPortalCache(ctx)
+	if !alreadyLocked {
+		portal.Bridge.cacheLock.Lock()
+		defer portal.Bridge.cacheLock.Unlock()
+	}
+	delete(portal.Bridge.portalsByMXID, oldMXID)
 	return nil
 }
 
@@ -5347,6 +5482,9 @@ func (portal *Portal) removeInPortalCache(ctx context.Context) {
 }
 
 func (portal *Portal) unlockedDelete(ctx context.Context) error {
+	if portal.backgroundCtx.Err() != nil {
+		return nil
+	}
 	err := portal.safeDBDelete(ctx)
 	if err != nil {
 		return err
@@ -5356,14 +5494,14 @@ func (portal *Portal) unlockedDelete(ctx context.Context) error {
 }
 
 func (portal *Portal) unlockedDeleteCache() {
-	if portal.deleted.IsSet() {
+	if portal.backgroundCtx.Err() != nil {
 		return
 	}
 	delete(portal.Bridge.portalsByKey, portal.PortalKey)
 	if portal.MXID != "" {
 		delete(portal.Bridge.portalsByMXID, portal.MXID)
 	}
-	portal.deleted.Set()
+	portal.cancelBackground()
 	if portal.events != nil {
 		// TODO there's a small risk of this racing with a queueEvent call
 		close(portal.events)
@@ -5389,18 +5527,4 @@ func (portal *Portal) SetRelay(ctx context.Context, relay *UserLogin) error {
 		return err
 	}
 	return nil
-}
-
-func (portal *Portal) PerMessageProfileForSender(ctx context.Context, sender networkid.UserID) (profile event.BeeperPerMessageProfile, err error) {
-	var ghost *Ghost
-	ghost, err = portal.Bridge.GetGhostByID(ctx, sender)
-	if err != nil {
-		return
-	}
-	profile.ID = string(ghost.Intent.GetMXID())
-	profile.Displayname = ghost.Name
-	if ghost.AvatarMXC != "" {
-		profile.AvatarURL = &ghost.AvatarMXC
-	}
-	return
 }
