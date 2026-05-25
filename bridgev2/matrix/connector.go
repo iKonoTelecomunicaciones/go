@@ -29,18 +29,18 @@ import (
 	"go.mau.fi/util/random"
 	"golang.org/x/sync/semaphore"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/appservice"
-	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/bridgeconfig"
-	"maunium.net/go/mautrix/bridgev2/commands"
-	"maunium.net/go/mautrix/bridgev2/database"
-	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/bridgev2/status"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
-	"maunium.net/go/mautrix/mediaproxy"
-	"maunium.net/go/mautrix/sqlstatestore"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/appservice"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/bridgeconfig"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/commands"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/database"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/status"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
+	"github.com/iKonoTelecomunicaciones/go/mediaproxy"
+	"github.com/iKonoTelecomunicaciones/go/sqlstatestore"
 )
 
 type Crypto interface {
@@ -689,6 +689,10 @@ func (br *Connector) GetMembers(ctx context.Context, roomID id.RoomID) (map[id.U
 func (br *Connector) GetMemberInfo(ctx context.Context, roomID id.RoomID, userID id.UserID) (*event.MemberEventContent, error) {
 	// TODO fetch from network sometimes?
 	return br.AS.StateStore.GetMember(ctx, roomID, userID)
+}
+
+func (br *Connector) GetDisplayname(ctx context.Context, userID id.UserID) string {
+	return br.AS.StateStore.GetDisplayname(ctx, userID)
 }
 
 func (br *Connector) IsConfusableName(ctx context.Context, roomID id.RoomID, userID id.UserID, name string) ([]id.UserID, error) {

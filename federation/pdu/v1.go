@@ -21,10 +21,10 @@ import (
 	"github.com/tidwall/gjson"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/crypto/canonicaljson"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/federation/signutil"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/federation/signutil"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type V1EventReference struct {

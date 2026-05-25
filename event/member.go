@@ -7,7 +7,7 @@
 package event
 
 import (
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // Membership is an enum specifying the membership state of a room member.

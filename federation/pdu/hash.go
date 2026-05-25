@@ -16,8 +16,8 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"maunium.net/go/mautrix/crypto/canonicaljson"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 func (pdu *PDU) CalculateContentHash() ([32]byte, error) {

@@ -18,7 +18,7 @@ import (
 
 	"go.mau.fi/util/jsonbytes"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type MessageStatusReason string

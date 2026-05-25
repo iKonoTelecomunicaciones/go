@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mau.fi/util/exhttp"
 
-	"maunium.net/go/mautrix/federation"
+	"github.com/iKonoTelecomunicaciones/go/federation"
 )
 
 func TestServerKeyResponse_VerifySelfSignature(t *testing.T) {

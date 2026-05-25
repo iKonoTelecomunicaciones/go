@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"maunium.net/go/mautrix/crypto/attachment"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/crypto/attachment"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // MessageType is the sub-type of a m.room.message event.

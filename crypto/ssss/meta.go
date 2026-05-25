@@ -16,7 +16,7 @@ import (
 
 	"go.mau.fi/util/random"
 
-	"maunium.net/go/mautrix/crypto/utils"
+	"github.com/iKonoTelecomunicaciones/go/crypto/utils"
 )
 
 // KeyMetadata represents server-side metadata about a SSSS key. The metadata can be used to get

@@ -16,7 +16,7 @@ import (
 	"go.mau.fi/util/exbytes"
 	"go.mau.fi/util/exerrors"
 
-	"maunium.net/go/mautrix/event/cmdschema/testdata"
+	"github.com/iKonoTelecomunicaciones/go/event/cmdschema/testdata"
 )
 
 type QuoteParseOutput struct {

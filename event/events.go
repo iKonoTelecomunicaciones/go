@@ -12,7 +12,7 @@ import (
 
 	"go.mau.fi/util/jsontime"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // Event represents a single Matrix event.

@@ -13,9 +13,9 @@ import (
 
 	"go.mau.fi/util/dbutil"
 
-	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/crypto/attachment"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/crypto/attachment"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type PublicMediaQuery struct {

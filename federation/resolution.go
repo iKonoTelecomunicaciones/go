@@ -21,7 +21,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"maunium.net/go/mautrix"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
 )
 
 type ResolvedServerName struct {

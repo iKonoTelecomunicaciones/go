@@ -29,9 +29,9 @@ import (
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/requestlog"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/federation"
-	"maunium.net/go/mautrix/id"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/federation"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type GetMediaResponse interface {

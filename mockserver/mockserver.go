@@ -24,11 +24,11 @@ import (
 	"go.mau.fi/util/exhttp"
 	"go.mau.fi/util/random"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/crypto"
-	"maunium.net/go/mautrix/crypto/cryptohelper"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/crypto"
+	"github.com/iKonoTelecomunicaciones/go/crypto/cryptohelper"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 func mustDecode(r *http.Request, data any) {

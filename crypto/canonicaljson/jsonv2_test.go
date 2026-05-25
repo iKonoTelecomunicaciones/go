@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"maunium.net/go/mautrix/crypto/canonicaljson"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
 )
 
 var canonicalizeTests = []struct {

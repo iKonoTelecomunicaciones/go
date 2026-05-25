@@ -20,10 +20,10 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/exmaps"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type RespImagePackSavedToRoom struct {

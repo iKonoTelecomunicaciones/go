@@ -7,10 +7,11 @@
 package goolm
 
 import (
-	"maunium.net/go/mautrix/crypto/goolm/account"
-	"maunium.net/go/mautrix/crypto/goolm/pk"
-	"maunium.net/go/mautrix/crypto/goolm/session"
-	"maunium.net/go/mautrix/crypto/olm"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm/account"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm/pk"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm/session"
+
+	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
 )
 
 func Register() {

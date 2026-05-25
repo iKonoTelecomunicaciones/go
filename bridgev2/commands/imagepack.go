@@ -9,9 +9,9 @@ package commands
 import (
 	"fmt"
 
-	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/provisionutil"
-	"maunium.net/go/mautrix/format"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/provisionutil"
+	"github.com/iKonoTelecomunicaciones/go/format"
 )
 
 var CommandImportImagePack = &FullHandler{

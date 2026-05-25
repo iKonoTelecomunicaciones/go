@@ -13,7 +13,7 @@ import (
 
 	"go.mau.fi/util/jsontime"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // CanonicalAliasEventContent represents the content of a m.room.canonical_alias state event.

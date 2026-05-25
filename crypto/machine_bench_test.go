@@ -16,9 +16,9 @@ import (
 	globallog "github.com/rs/zerolog/log" // zerolog-allow-global-log
 	"github.com/stretchr/testify/require"
 
-	"maunium.net/go/mautrix/crypto/cryptohelper"
-	"maunium.net/go/mautrix/id"
-	"maunium.net/go/mautrix/mockserver"
+	"github.com/iKonoTelecomunicaciones/go/crypto/cryptohelper"
+	"github.com/iKonoTelecomunicaciones/go/id"
+	"github.com/iKonoTelecomunicaciones/go/mockserver"
 )
 
 func randomDeviceCount(r *rand.Rand) int {

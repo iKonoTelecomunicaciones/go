@@ -21,7 +21,7 @@ func init() {
 		info, _ := debug.ReadBuildInfo()
 		if info != nil {
 			for _, mod := range info.Deps {
-				if mod.Path == "maunium.net/go/mautrix" {
+				if mod.Path == "github.com/iKonoTelecomunicaciones/go" {
 					GoModVersion = mod.Version
 					break
 				}

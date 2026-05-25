@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"unsafe"
 
-	"maunium.net/go/mautrix/crypto/olm"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/crypto/olm"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // InboundGroupSession stores an inbound encrypted messaging session for a

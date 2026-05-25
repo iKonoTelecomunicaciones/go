@@ -18,8 +18,8 @@ import (
 	"github.com/tidwall/sjson"
 	"go.mau.fi/util/exgjson"
 
-	"maunium.net/go/mautrix/crypto/canonicaljson"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 var ErrSignatureNotFound = errors.New("signature not found")

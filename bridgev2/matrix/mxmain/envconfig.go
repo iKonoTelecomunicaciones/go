@@ -16,7 +16,7 @@ import (
 
 	"go.mau.fi/util/random"
 
-	"maunium.net/go/mautrix/bridgev2"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2"
 )
 
 func LoadGlobalConfigEnv() {

@@ -12,7 +12,7 @@ import (
 
 	"go.mau.fi/util/jsonbytes"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // EncryptionEventContent represents the content of a m.room.encryption state event.

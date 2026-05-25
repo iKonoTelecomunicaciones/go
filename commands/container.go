@@ -14,7 +14,7 @@ import (
 
 	"go.mau.fi/util/exmaps"
 
-	"maunium.net/go/mautrix/event/cmdschema"
+	"github.com/iKonoTelecomunicaciones/go/event/cmdschema"
 )
 
 type CommandContainer[MetaType any] struct {

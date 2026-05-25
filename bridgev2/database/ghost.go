@@ -16,9 +16,9 @@ import (
 	"go.mau.fi/util/dbutil"
 	"go.mau.fi/util/exerrors"
 
-	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/crypto/canonicaljson"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/bridgev2/networkid"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type GhostQuery struct {

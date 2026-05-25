@@ -7,7 +7,7 @@
 package event
 
 import (
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type ImagePackImage struct {

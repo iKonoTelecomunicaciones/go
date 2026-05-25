@@ -21,8 +21,8 @@ import (
 	"go.mau.fi/util/jsonbytes"
 	"go.mau.fi/util/ptr"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // GetKeyFunc is a callback for retrieving the key corresponding to a given key ID when verifying the signature of a PDU.

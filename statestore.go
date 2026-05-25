@@ -14,8 +14,8 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/exerrors"
 
-	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/event"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 // StateStore is an interface for storing basic room state information.
@@ -25,6 +25,8 @@ type StateStore interface {
 	IsMembership(ctx context.Context, roomID id.RoomID, userID id.UserID, allowedMemberships ...event.Membership) bool
 	GetMember(ctx context.Context, roomID id.RoomID, userID id.UserID) (*event.MemberEventContent, error)
 	TryGetMember(ctx context.Context, roomID id.RoomID, userID id.UserID) (*event.MemberEventContent, error)
+	GetDisplayname(ctx context.Context, userID id.UserID) string
+	TryGetDisplayname(ctx context.Context, userID id.UserID) string
 	SetMembership(ctx context.Context, roomID id.RoomID, userID id.UserID, membership event.Membership) error
 	SetMember(ctx context.Context, roomID id.RoomID, userID id.UserID, member *event.MemberEventContent) error
 	IsConfusableName(ctx context.Context, roomID id.RoomID, currentUser id.UserID, name string) ([]id.UserID, error)
@@ -198,6 +200,27 @@ func (store *MemoryStateStore) TryGetMember(_ context.Context, roomID id.RoomID,
 	}
 	member = members[userID]
 	return
+}
+
+func (store *MemoryStateStore) GetDisplayname(ctx context.Context, userID id.UserID) string {
+	displayName := store.TryGetDisplayname(ctx, userID)
+
+	if displayName == "" {
+		return userID.String()
+	}
+
+	return displayName
+}
+
+func (store *MemoryStateStore) TryGetDisplayname(_ context.Context, userID id.UserID) string {
+	store.membersLock.RLock()
+	defer store.membersLock.RUnlock()
+	for _, members := range store.Members {
+		if member, ok := members[userID]; ok {
+			return member.Displayname
+		}
+	}
+	return ""
 }
 
 func (store *MemoryStateStore) IsInRoom(ctx context.Context, roomID id.RoomID, userID id.UserID) bool {

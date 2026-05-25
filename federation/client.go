@@ -22,10 +22,10 @@ import (
 	"go.mau.fi/util/exslices"
 	"go.mau.fi/util/jsontime"
 
-	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/crypto/canonicaljson"
-	"maunium.net/go/mautrix/federation/signutil"
-	"maunium.net/go/mautrix/id"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
+	"github.com/iKonoTelecomunicaciones/go/crypto/canonicaljson"
+	"github.com/iKonoTelecomunicaciones/go/federation/signutil"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 type Client struct {

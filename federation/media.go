@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"strings"
 
-	"maunium.net/go/mautrix"
+	mautrix "github.com/iKonoTelecomunicaciones/go"
 )
 
 type FileMetadata struct {

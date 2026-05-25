@@ -16,9 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mau.fi/util/exerrors"
 
-	"maunium.net/go/mautrix/crypto"
-	"maunium.net/go/mautrix/crypto/verificationhelper"
-	"maunium.net/go/mautrix/event"
+	"github.com/iKonoTelecomunicaciones/go/crypto"
+	"github.com/iKonoTelecomunicaciones/go/crypto/verificationhelper"
+	"github.com/iKonoTelecomunicaciones/go/event"
 )
 
 func TestSelfVerification_Accept_QRContents(t *testing.T) {

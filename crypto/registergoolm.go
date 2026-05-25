@@ -3,7 +3,7 @@
 package crypto
 
 import (
-	"maunium.net/go/mautrix/crypto/goolm"
+	"github.com/iKonoTelecomunicaciones/go/crypto/goolm"
 )
 
 func init() {

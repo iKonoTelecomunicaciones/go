@@ -14,7 +14,7 @@ import (
 
 	"go.mau.fi/util/random"
 
-	"maunium.net/go/mautrix/id"
+	"github.com/iKonoTelecomunicaciones/go/id"
 )
 
 var (

@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"reflect"
 
-	"maunium.net/go/mautrix/event"
+	"github.com/iKonoTelecomunicaciones/go/event"
 )
 
 // EventContent represents the content of a m.push_rules account data event.
