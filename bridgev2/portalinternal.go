@@ -317,8 +317,8 @@ func (portal *PortalInternals) RoomIsPublic(ctx context.Context) bool {
 	return (*Portal)(portal).roomIsPublic(ctx)
 }
 
-func (portal *PortalInternals) SyncParticipants(ctx context.Context, members *ChatMemberList, source *UserLogin, sender MatrixAPI, ts time.Time) error {
-	return (*Portal)(portal).syncParticipants(ctx, members, source, sender, ts)
+func (portal *PortalInternals) SyncParticipants(ctx context.Context, members *ChatMemberList, source *UserLogin, sender MatrixAPI, ts time.Time, inviteReason string) error {
+	return (*Portal)(portal).syncParticipants(ctx, members, source, sender, ts, inviteReason)
 }
 
 func (portal *PortalInternals) UpdateUserLocalInfo(ctx context.Context, info *UserLocalPortalInfo, source *UserLogin, didJustCreate bool) {
@@ -333,8 +333,8 @@ func (portal *PortalInternals) LockedUpdateInfoFromGhost(ctx context.Context, gh
 	(*Portal)(portal).lockedUpdateInfoFromGhost(ctx, ghost)
 }
 
-func (portal *PortalInternals) CreateMatrixRoomInLoop(ctx context.Context, source *UserLogin, info *ChatInfo, backfillBundle any) error {
-	return (*Portal)(portal).createMatrixRoomInLoop(ctx, source, info, backfillBundle)
+func (portal *PortalInternals) CreateMatrixRoomInLoop(ctx context.Context, source *UserLogin, info *ChatInfo, backfillBundle any, inviteReason string) error {
+	return (*Portal)(portal).createMatrixRoomInLoop(ctx, source, info, backfillBundle, inviteReason)
 }
 
 func (portal *PortalInternals) AddToUserSpaces(ctx context.Context) {

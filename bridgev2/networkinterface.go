@@ -1138,6 +1138,11 @@ const (
 	RemoteEventBackfill
 )
 
+type RemoteEventWithInviteReason interface {
+	RemoteEvent
+	GetInviteReason() string
+}
+
 // RemoteEvent represents a single event from the remote network, such as a message or a reaction.
 //
 // When a [NetworkAPI] receives an event from the remote network, it should convert it into a [RemoteEvent]

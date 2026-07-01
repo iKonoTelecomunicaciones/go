@@ -611,7 +611,7 @@ func (portal *Portal) handleSingleEvent(ctx context.Context, rawEvt any, doneCal
 	case *portalRemoteEvent:
 		res = portal.handleRemoteEvent(ctx, evt.source, evt.evtType, evt.evt)
 	case *portalCreateEvent:
-		err := portal.createMatrixRoomInLoop(evt.ctx, evt.source, evt.info, nil)
+		err := portal.createMatrixRoomInLoop(evt.ctx, evt.source, evt.info, nil, "")
 		res.Success = err == nil
 		evt.cb(err)
 	default:
@@ -2569,7 +2569,14 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 		if ok {
 			bundle = bundleProvider.GetBundledBackfillData()
 		}
-		err = portal.createMatrixRoomInLoop(ctx, source, info, bundle)
+		var inviteReason string = ""
+
+		if evtType == RemoteEventMessageUpsert {
+			if reasonProvider, ok := evt.(RemoteEventWithInviteReason); ok {
+				inviteReason = reasonProvider.GetInviteReason()
+			}
+		}
+		err = portal.createMatrixRoomInLoop(ctx, source, info, bundle, inviteReason)
 		if err != nil {
 			log.Err(err).Msg("Failed to create portal to handle event")
 			return EventHandlingResultFailed.WithError(err)
@@ -3989,7 +3996,7 @@ func (portal *Portal) ProcessChatInfoChange(ctx context.Context, sender EventSen
 		portal.UpdateInfo(ctx, change.ChatInfo, source, intent, ts)
 	}
 	if change.MemberChanges != nil {
-		err := portal.syncParticipants(ctx, change.MemberChanges, source, intent, ts)
+		err := portal.syncParticipants(ctx, change.MemberChanges, source, intent, ts, "")
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to sync room members")
 		}
@@ -4597,6 +4604,7 @@ func (portal *Portal) syncParticipants(
 	source *UserLogin,
 	sender MatrixAPI,
 	ts time.Time,
+	inviteReason string,
 ) error {
 	members.memberListToMap(ctx)
 	var loginsInPortal []*UserLogin
@@ -4667,6 +4675,9 @@ func (portal *Portal) syncParticipants(
 			if thisEvtSender.GetMXID() == extraUserID {
 				thisEvtSender = portal.Bridge.Bot
 			}
+		}
+		if content.Membership == event.MembershipInvite {
+			content.Reason = inviteReason
 		}
 		addLogContext := func(e *zerolog.Event) *zerolog.Event {
 			return e.Stringer("target_user_id", extraUserID).
@@ -5064,7 +5075,7 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 		portal.MessageRequest = *info.MessageRequest
 	}
 	if info.Members != nil && portal.MXID != "" && source != nil {
-		err := portal.syncParticipants(ctx, info.Members, source, nil, time.Time{})
+		err := portal.syncParticipants(ctx, info.Members, source, nil, time.Time{}, "")
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to sync room members")
 		}
@@ -5143,7 +5154,7 @@ func (portal *Portal) CreateMatrixRoom(ctx context.Context, source *UserLogin, i
 	}
 }
 
-func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLogin, info *ChatInfo, backfillBundle any) error {
+func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLogin, info *ChatInfo, backfillBundle any, inviteReason string) error {
 	cancellableCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	portal.cancelRoomCreate.CompareAndSwap(nil, &cancel)
@@ -5357,7 +5368,7 @@ func (portal *Portal) createMatrixRoomInLoop(ctx context.Context, source *UserLo
 				}
 			}
 		} else {
-			err = portal.syncParticipants(ctx, info.Members, source, nil, time.Time{})
+			err = portal.syncParticipants(ctx, info.Members, source, nil, time.Time{}, inviteReason)
 			if err != nil {
 				log.Err(err).Msg("Failed to sync participants after room creation")
 			}
