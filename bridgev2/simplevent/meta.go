@@ -24,6 +24,7 @@ type EventMeta struct {
 	UncertainReceiver bool
 	Sender            bridgev2.EventSender
 	CreatePortal      bool
+	InviteReason      string
 	Timestamp         time.Time
 	StreamOrder       int64
 
