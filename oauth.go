@@ -20,7 +20,7 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/random"
 
-	"maunium.net/go/mautrix/oauth"
+	"github.com/iKonoTelecomunicaciones/go/oauth"
 )
 
 const (
