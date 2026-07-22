@@ -211,6 +211,9 @@ homeserver:
     websocket: false
     # How often should the websocket be pinged? Pinging will be disabled if this is zero.
     ping_interval_seconds: 0
+    # When requests to the homeserver fail with a 502/503/504/429 status or a network error,
+    # how many times should the bridge retry the request before giving up?
+    retry_limit: 4
 
 # Application service host/registration related details.
 # Changing these values requires regeneration of the registration (except when noted otherwise)
@@ -300,6 +303,9 @@ provisioning:
     # Enable session transfers between bridges. Note that this only validates Matrix or shared secret
     # auth before passing live network client credentials down in the response.
     enable_session_transfers: false
+    # Should the provisioning API fail immediately if a webauthn step is returned?
+    # This is mostly useful for clients that don't yet support it and want a trackable error instead.
+    fail_on_webauthn: false
 
 # Some networks require publicly accessible media download links (e.g. for user avatars when using Discord webhooks).
 # These settings control whether the bridge will provide such public media access.
@@ -425,6 +431,8 @@ encryption:
     # Enable key sharing? If enabled, key requests for rooms where users are in will be fulfilled.
     # You must use a client that supports requesting keys from other users to use this feature.
     allow_key_sharing: true
+    # Should m.mentions be sent in the unencrypted content? This is non-standard and should not be enabled.
+    plaintext_mentions: false
     # Pickle key for encrypting encryption keys in the bridge database.
     # If set to generate, a random key will be generated.
     pickle_key: generate
@@ -490,6 +498,9 @@ encryption:
 #
 # e.g. if the prefix is set to `BRIDGE_`, then `BRIDGE_APPSERVICE__AS_TOKEN` will set appservice.as_token.
 # `BRIDGE_appservice.as_token` would work as well, but can't be set in a shell as easily.
+#
+# The variable names can also have a `_FILE` suffix to tell the bridge to read the value from the
+# path set in the variable rather than using the value directly.
 #
 # If this is null, reading config fields from environment will be disabled.
 env_config_prefix: null

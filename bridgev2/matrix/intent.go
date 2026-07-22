@@ -53,6 +53,12 @@ func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType
 	if eventType == event.EventRedaction && !as.Connector.SpecVersions.Supports(mautrix.FeatureRedactSendAsEvent) {
 		parsedContent := content.Parsed.(*event.RedactionEventContent)
 		as.Matrix.AddDoublePuppetValue(content)
+		if parsedContent.DontRenderPlaceholder {
+			if content.Raw == nil {
+				content.Raw = make(map[string]any)
+			}
+			content.Raw["com.beeper.dont_render_redacted_placeholder"] = true
+		}
 		return as.Matrix.RedactEvent(ctx, roomID, parsedContent.Redacts, mautrix.ReqRedact{
 			Reason: parsedContent.Reason,
 			Extra:  content.Raw,
@@ -267,7 +273,7 @@ func (as *ASIntent) DownloadMediaToFile(ctx context.Context, uri id.ContentURISt
 
 func (as *ASIntent) UploadMedia(ctx context.Context, roomID id.RoomID, data []byte, fileName, mimeType string) (url id.ContentURIString, file *event.EncryptedFileInfo, err error) {
 	if int64(len(data)) > as.Connector.MediaConfig.UploadSize {
-		return "", nil, fmt.Errorf("file too large (%.2f MB > %.2f MB)", float64(len(data))/1000/1000, float64(as.Connector.MediaConfig.UploadSize)/1000/1000)
+		return "", nil, fmt.Errorf("%w (%.2f MB > %.2f MB)", bridgev2.ErrMediaTooLarge, float64(len(data))/1000/1000, float64(as.Connector.MediaConfig.UploadSize)/1000/1000)
 	}
 	if roomID != "" {
 		var encrypted bool
@@ -299,7 +305,7 @@ func (as *ASIntent) UploadMediaStream(
 	cb bridgev2.FileStreamCallback,
 ) (url id.ContentURIString, file *event.EncryptedFileInfo, err error) {
 	if size > as.Connector.MediaConfig.UploadSize {
-		return "", nil, fmt.Errorf("file too large (%.2f MB > %.2f MB)", float64(size)/1000/1000, float64(as.Connector.MediaConfig.UploadSize)/1000/1000)
+		return "", nil, fmt.Errorf("%w (%.2f MB > %.2f MB)", bridgev2.ErrMediaTooLarge, float64(size)/1000/1000, float64(as.Connector.MediaConfig.UploadSize)/1000/1000)
 	}
 	if !requireFile && 0 < size && size < as.Connector.Config.Matrix.UploadFileThreshold {
 		var buf bytes.Buffer
@@ -392,7 +398,7 @@ func (as *ASIntent) UploadMediaStream(
 	}
 	size = info.Size()
 	if size > as.Connector.MediaConfig.UploadSize {
-		return "", nil, fmt.Errorf("file too large (%.2f MB > %.2f MB)", float64(size)/1000/1000, float64(as.Connector.MediaConfig.UploadSize)/1000/1000)
+		return "", nil, fmt.Errorf("%w (%.2f MB > %.2f MB)", bridgev2.ErrMediaTooLarge, float64(size)/1000/1000, float64(as.Connector.MediaConfig.UploadSize)/1000/1000)
 	}
 	req := mautrix.ReqUploadMedia{
 		Content:       replFile,
@@ -755,7 +761,7 @@ func (as *ASIntent) MuteRoom(ctx context.Context, roomID id.RoomID, until time.T
 		return err
 	} else {
 		return as.Matrix.PutPushRule(ctx, "global", pushrules.RoomRule, string(roomID), &mautrix.ReqPutPushRule{
-			Actions: []pushrules.PushActionType{pushrules.ActionDontNotify},
+			Actions: []*pushrules.PushAction{},
 		})
 	}
 }

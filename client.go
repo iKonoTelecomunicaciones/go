@@ -31,6 +31,7 @@ import (
 	"github.com/iKonoTelecomunicaciones/go/crypto/backup"
 	"github.com/iKonoTelecomunicaciones/go/event"
 	"github.com/iKonoTelecomunicaciones/go/id"
+	"github.com/iKonoTelecomunicaciones/go/oauth"
 	"github.com/iKonoTelecomunicaciones/go/pushrules"
 )
 
@@ -93,6 +94,15 @@ type Client struct {
 	SpecVersions   *RespVersions
 	ExternalClient *http.Client // The HTTP client used for external (not matrix) media HTTP requests.
 
+	oauthMetadata     *oauth.ServerMetadata
+	oauthClientID     string
+	oauthMetadataLock sync.Mutex
+	refreshToken      string
+	accessTokenExpiry time.Time
+	longTokenLifetime bool
+	refreshLock       sync.RWMutex
+	SaveNewToken      func(ctx context.Context, refreshToken, accessToken string, expiry time.Time) error
+
 	Log zerolog.Logger
 
 	RequestHook  func(req *http.Request)
@@ -110,6 +120,9 @@ type Client struct {
 	DefaultHTTPRetries int
 	// Amount of time to wait between HTTP retries, defaults to 4 seconds
 	DefaultHTTPBackoff time.Duration
+	// Maximum time to wait between HTTP retries, defaults to 10 minutes.
+	// This applies to both the exponential backoff from gateway/network errors and to 429 errors.
+	MaxHTTPBackoff time.Duration
 	// Set to true to disable automatically sleeping on 429 errors.
 	IgnoreRateLimit bool
 
@@ -251,7 +264,34 @@ func (cli *Client) SyncWithContext(ctx context.Context) error {
 	lastSuccessfulSync := time.Now().Add(-cli.StreamSyncMinAge - 1*time.Hour)
 	// Always do first sync with 0 timeout
 	isFailing := true
+	onError := func(resSync *RespSync, err error) error {
+		isFailing = true
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		duration, err := cli.Syncer.OnFailedSync(resSync, err)
+		if err != nil {
+			return err
+		}
+		if duration <= 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(duration):
+			return nil
+		}
+	}
 	for {
+		_, err = cli.refreshTokenIfNeeded(ctx, true)
+		if err != nil {
+			err = onError(nil, fmt.Errorf("%w in sync loop: %w", ErrFailedToRefreshToken, err))
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		streamResp := false
 		if cli.StreamSyncMinAge > 0 && time.Since(lastSuccessfulSync) > cli.StreamSyncMinAge {
 			cli.Log.Debug().Msg("Last sync is old, will stream next response")
@@ -270,23 +310,11 @@ func (cli *Client) SyncWithContext(ctx context.Context) error {
 			StreamResponse: streamResp,
 		})
 		if err != nil {
-			isFailing = true
-			if ctx.Err() != nil {
-				return ctx.Err()
+			err = onError(resSync, err)
+			if err != nil {
+				return err
 			}
-			duration, err2 := cli.Syncer.OnFailedSync(resSync, err)
-			if err2 != nil {
-				return err2
-			}
-			if duration <= 0 {
-				continue
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(duration):
-				continue
-			}
+			continue
 		}
 		isFailing = false
 		lastSuccessfulSync = time.Now()
@@ -334,6 +362,7 @@ const (
 	LogRequestIDContextKey
 	MaxAttemptsContextKey
 	SyncTokenContextKey
+	oauthReqContextKey
 )
 
 func (cli *Client) RequestStart(req *http.Request) {
@@ -418,11 +447,11 @@ type FullRequest struct {
 	Method            string
 	URL               string
 	Headers           http.Header
-	RequestJSON       interface{}
+	RequestJSON       any
 	RequestBytes      []byte
 	RequestBody       io.Reader
 	RequestLength     int64
-	ResponseJSON      interface{}
+	ResponseJSON      any
 	MaxAttempts       int
 	BackoffDuration   time.Duration
 	SensitiveContent  bool
@@ -467,7 +496,11 @@ func (params *FullRequest) compileRequest(ctx context.Context) (*http.Request, e
 		reqBody = bytes.NewReader(jsonStr)
 		reqLen = int64(len(jsonStr))
 	} else if params.RequestBytes != nil {
-		logBody = fmt.Sprintf("<%d bytes>", len(params.RequestBytes))
+		if params.Headers.Get("Content-Type") == "application/x-www-form-urlencoded" && len(params.RequestBytes) < 4196 {
+			logBody = string(params.RequestBytes)
+		} else {
+			logBody = fmt.Sprintf("<%d bytes>", len(params.RequestBytes))
+		}
 		reqBody = bytes.NewReader(params.RequestBytes)
 		reqLen = int64(len(params.RequestBytes))
 	} else if params.RequestBody != nil {
@@ -554,9 +587,6 @@ func (cli *Client) MakeFullRequestWithResp(ctx context.Context, params FullReque
 	if cli.UserAgent != "" {
 		req.Header.Set("User-Agent", cli.UserAgent)
 	}
-	if len(cli.AccessToken) > 0 {
-		req.Header.Set("Authorization", "Bearer "+cli.AccessToken)
-	}
 	if params.ResponseSizeLimit == 0 {
 		params.ResponseSizeLimit = cli.ResponseSizeLimit
 	}
@@ -567,6 +597,7 @@ func (cli *Client) MakeFullRequestWithResp(ctx context.Context, params FullReque
 		params.Client = cli.Client
 	}
 	return cli.executeCompiledRequest(
+		ctx,
 		req,
 		params.MaxAttempts-1,
 		params.BackoffDuration,
@@ -587,6 +618,7 @@ func (cli *Client) cliOrContextLog(ctx context.Context) *zerolog.Logger {
 }
 
 func (cli *Client) doRetry(
+	origCtx context.Context,
 	req *http.Request,
 	cause error,
 	retries int,
@@ -617,6 +649,11 @@ func (cli *Client) doRetry(
 			return nil, nil, cause
 		}
 	}
+	maxBackoff := cli.MaxHTTPBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = 10 * time.Minute
+	}
+	backoff = min(backoff, maxBackoff)
 	log.Warn().Err(cause).
 		Str("method", req.Method).
 		Str("url", req.URL.String()).
@@ -632,7 +669,7 @@ func (cli *Client) doRetry(
 			return nil, nil, req.Context().Err()
 		}
 	}
-	return cli.executeCompiledRequest(req, retries-1, backoff*2, responseJSON, handler, dontReadResponse, sizeLimit, client)
+	return cli.executeCompiledRequest(origCtx, req, retries-1, backoff*2, responseJSON, handler, dontReadResponse, sizeLimit, client)
 }
 
 func readResponseBody(req *http.Request, res *http.Response, limit int64) ([]byte, error) {
@@ -686,7 +723,7 @@ func streamResponse(req *http.Request, res *http.Response, responseJSON any, lim
 	} else if _, err = file.Seek(0, 0); err != nil {
 		return nil, fmt.Errorf("failed to seek to beginning of response file: %w", err)
 	} else if err = json.NewDecoder(file).Decode(responseJSON); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response body: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal response body to file: %w", err)
 	} else {
 		return nil, nil
 	}
@@ -729,7 +766,11 @@ func ParseErrorResponse(req *http.Request, res *http.Response) ([]byte, error) {
 	respErr := &RespError{
 		StatusCode: res.StatusCode,
 	}
-	if _ = json.Unmarshal(contents, respErr); respErr.ErrCode == "" {
+	_ = json.Unmarshal(contents, respErr)
+	if req.Context().Value(oauthReqContextKey) != nil {
+		respErr.mutateOAuthError()
+	}
+	if respErr.ErrCode == "" {
 		respErr = nil
 	}
 
@@ -740,24 +781,41 @@ func ParseErrorResponse(req *http.Request, res *http.Response) ([]byte, error) {
 	}
 }
 
-func (cli *Client) prepareRequestAttempt(req *http.Request) (*http.Request, func()) {
+func (cli *Client) prepareRequestAttempt(origCtx context.Context, req *http.Request) (*http.Request, func(), string, error) {
+	var token string
+	if origCtx.Value(oauthReqContextKey) == nil {
+		var err error
+		token, err = cli.refreshTokenIfNeeded(origCtx, false)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("%w: %w", ErrFailedToRefreshToken, err)
+		}
+		if len(token) > 0 {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+
 	// if there's no retry trigger, nothing to do
 	if cli.RequestRetryTrigger == nil {
-		return req, nil
+		return req, nil, "", nil
 	}
 
 	attemptCtx, cancel := context.WithCancelCause(req.Context())
 
+	// Register as a waiter synchronously so we're waiting by the time this method returns, avoid
+	// race on trigger notify and the goroutine below.
+	resetCh := cli.RequestRetryTrigger.GetChan()
+
 	go func() {
-		// If we hear of a reset, cancel the request context with a retry message
-		if cli.RequestRetryTrigger.Wait(attemptCtx) == nil {
+		select {
+		case <-resetCh:
 			cancel(ErrContextCancelRetry)
+		case <-attemptCtx.Done():
 		}
 	}()
 
 	return req.WithContext(attemptCtx), sync.OnceFunc(func() {
 		cancel(context.Canceled)
-	})
+	}), token, nil
 }
 
 type cleanupReadCloser struct {
@@ -807,6 +865,7 @@ func maybeWrapRespBody(rc io.ReadCloser, cleanup func()) io.ReadCloser {
 }
 
 func (cli *Client) executeCompiledRequest(
+	origCtx context.Context,
 	req *http.Request,
 	retries int,
 	backoff time.Duration,
@@ -816,7 +875,10 @@ func (cli *Client) executeCompiledRequest(
 	sizeLimit int64,
 	client *http.Client,
 ) ([]byte, *http.Response, error) {
-	attemptReq, cleanup := cli.prepareRequestAttempt(req)
+	attemptReq, cleanup, token, err := cli.prepareRequestAttempt(origCtx, req)
+	if err != nil {
+		return nil, nil, err
+	}
 	cli.RequestStart(attemptReq)
 	startTime := time.Now()
 	res, err := client.Do(attemptReq)
@@ -844,7 +906,7 @@ func (cli *Client) executeCompiledRequest(
 			errors.Is(attemptCause, ErrContextCancelRetry)
 		if retries > 0 && canRetry {
 			return cli.doRetry(
-				req, retryCause, retries, backoff, responseJSON, handler, dontReadResponse, sizeLimit, client,
+				origCtx, req, retryCause, retries, backoff, responseJSON, handler, dontReadResponse, sizeLimit, client,
 			)
 		}
 		err = HTTPError{
@@ -858,15 +920,18 @@ func (cli *Client) executeCompiledRequest(
 		return nil, res, err
 	}
 
+	var body []byte
 	if retries > 0 && retryafter.Should(res.StatusCode, !cli.IgnoreRateLimit) {
 		backoff = retryafter.Parse(res.Header.Get("Retry-After"), backoff)
 		return cli.doRetry(
-			req, fmt.Errorf("HTTP %d", res.StatusCode), retries, backoff, responseJSON, handler, dontReadResponse, sizeLimit, client,
+			origCtx, req, fmt.Errorf("HTTP %d", res.StatusCode), retries, backoff, responseJSON, handler, dontReadResponse, sizeLimit, client,
 		)
-	}
-
-	var body []byte
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
+	} else if res.StatusCode == 401 && cli.shouldRetryWithRefreshedToken(origCtx, token) {
+		_, err = ParseErrorResponse(attemptReq, res)
+		return cli.doRetry(
+			origCtx, req, err, retries, backoff, responseJSON, handler, dontReadResponse, sizeLimit, client,
+		)
+	} else if res.StatusCode < 200 || res.StatusCode >= 300 {
 		body, err = ParseErrorResponse(attemptReq, res)
 		cli.LogRequestDone(attemptReq, res, nil, nil, len(body), duration)
 	} else {
@@ -2149,6 +2214,7 @@ func (cli *Client) uploadMediaToURL(ctx context.Context, data ReqUploadMedia) (*
 				Msg("Error uploading media to external URL, not retrying")
 			return nil, err
 		}
+		// TODO change to exponential like normal retries?
 		backoff := time.Second * time.Duration(cli.DefaultHTTPRetries-retries)
 		cli.Log.Warn().Err(err).
 			Str("url", data.UnstableUploadURL).
@@ -2412,6 +2478,14 @@ func (cli *Client) Context(ctx context.Context, roomID id.RoomID, eventID id.Eve
 	urlPath := cli.BuildURLWithQuery(ClientURLPath{"v3", "rooms", roomID, "context", eventID}, query)
 	_, err = cli.MakeRequest(ctx, http.MethodGet, urlPath, nil, &resp)
 	return
+}
+
+func (cli *Client) Search(ctx context.Context, req *ReqSearch) (*RespSearch, error) {
+	urlPath := cli.BuildURLWithQuery(ClientURLPath{"v3", "search"}, req.Query())
+	wrappedReq := &ReqSearchWrapper{SearchCategories: ReqSearchCategoryWrapper{RoomEvents: req}}
+	var wrappedResp RespSearchWrapper
+	_, err := cli.MakeRequest(ctx, http.MethodPost, urlPath, wrappedReq, &wrappedResp)
+	return wrappedResp.SearchCategories.RoomEvents, err
 }
 
 func (cli *Client) GetEvent(ctx context.Context, roomID id.RoomID, eventID id.EventID) (resp *event.Event, err error) {
@@ -2812,6 +2886,14 @@ func (cli *Client) DeletePushRule(ctx context.Context, scope string, kind pushru
 	return err
 }
 
+func (cli *Client) SetPushRuleEnabled(ctx context.Context, scope string, kind pushrules.PushRuleType, ruleID string, enabled bool) error {
+	urlPath := cli.BuildClientURL("v3", "pushrules", scope, kind, ruleID, "enabled")
+	_, err := cli.MakeRequest(ctx, http.MethodPut, urlPath, map[string]any{
+		"enabled": enabled,
+	}, nil)
+	return err
+}
+
 func (cli *Client) PutPushRule(ctx context.Context, scope string, kind pushrules.PushRuleType, ruleID string, req *ReqPutPushRule) error {
 	query := make(map[string]string)
 	if len(req.After) > 0 {
@@ -2822,6 +2904,14 @@ func (cli *Client) PutPushRule(ctx context.Context, scope string, kind pushrules
 	}
 	urlPath := cli.BuildURLWithQuery(ClientURLPath{"v3", "pushrules", scope, kind, ruleID}, query)
 	_, err := cli.MakeRequest(ctx, http.MethodPut, urlPath, req, nil)
+	return err
+}
+
+func (cli *Client) PutPushRuleActions(ctx context.Context, scope string, kind pushrules.PushRuleType, ruleID string, actions []*pushrules.PushAction) error {
+	urlPath := cli.BuildClientURL("v3", "pushrules", scope, kind, ruleID, "actions")
+	_, err := cli.MakeRequest(ctx, http.MethodPut, urlPath, &ReqPutPushRule{
+		Actions: actions,
+	}, nil)
 	return err
 }
 

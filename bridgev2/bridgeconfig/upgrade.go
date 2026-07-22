@@ -89,6 +89,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Str|up.Null, "homeserver", "websocket_proxy")
 	helper.Copy(up.Bool, "homeserver", "websocket")
 	helper.Copy(up.Int, "homeserver", "ping_interval_seconds")
+	helper.Copy(up.Int, "homeserver", "retry_limit")
 
 	helper.Copy(up.Str|up.Null, "appservice", "address")
 	helper.Copy(up.Str|up.Null, "appservice", "public_address")
@@ -122,8 +123,10 @@ func doUpgrade(helper up.Helper) {
 	} else {
 		helper.Copy(up.Str, "provisioning", "shared_secret")
 	}
+	helper.Copy(up.Bool, "provisioning", "allow_matrix_auth")
 	helper.Copy(up.Bool, "provisioning", "debug_endpoints")
 	helper.Copy(up.Bool, "provisioning", "enable_session_transfers")
+	helper.Copy(up.Bool, "provisioning", "fail_on_webauthn")
 
 	helper.Copy(up.Bool, "direct_media", "enabled")
 	helper.Copy(up.Str|up.Null, "direct_media", "media_id_prefix")
@@ -176,6 +179,7 @@ func doUpgrade(helper up.Helper) {
 	helper.Copy(up.Bool, "encryption", "msc4392")
 	helper.Copy(up.Bool, "encryption", "self_sign")
 	helper.Copy(up.Bool, "encryption", "allow_key_sharing")
+	helper.Copy(up.Bool, "encryption", "plaintext_mentions")
 	if secret, ok := helper.Get(up.Str, "encryption", "pickle_key"); !ok || secret == "generate" {
 		helper.Set(up.Str, random.String(64), "encryption", "pickle_key")
 	} else {
