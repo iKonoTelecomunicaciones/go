@@ -84,6 +84,10 @@ func fnLogin(ce *Event) {
 		return
 	}
 	flows := ce.Bridge.Network.GetLoginFlows()
+	if len(flows) == 0 {
+		ce.Reply("No login flows available.")
+		return
+	}
 	var chosenFlowID string
 	if len(ce.Args) > 0 {
 		inputFlowID := strings.ToLower(ce.Args[0])
@@ -117,9 +121,13 @@ func fnLogin(ce *Event) {
 		ce.Reply("Failed to prepare login process: %v", err)
 		return
 	}
-	overridable, ok := login.(bridgev2.LoginProcessWithOverride)
+
 	var nextStep *bridgev2.LoginStep
-	if ok && reauth != nil {
+	if paramable, ok := login.(bridgev2.LoginProcessWithParams); ok {
+		nextStep, err = paramable.StartWithParams(ce.Ctx, bridgev2.LoginStartParams{
+			Override: reauth,
+		})
+	} else if overridable, ok := login.(bridgev2.LoginProcessWithOverride); ok && reauth != nil {
 		nextStep, err = overridable.StartWithOverride(ce.Ctx, reauth)
 	} else {
 		nextStep, err = login.Start(ce.Ctx)
@@ -153,6 +161,9 @@ func checkLoginCommandDirectParams(ce *Event, login bridgev2.LoginProcess, nextS
 		return nil
 	case bridgev2.LoginStepTypeWebAuthn:
 		ce.Reply("Invalid extra parameters for webauthn login step")
+		return nil
+	case bridgev2.LoginStepTypeClientHTTP:
+		ce.Reply("Invalid extra parameters for client HTTP login step")
 		return nil
 	case bridgev2.LoginStepTypeUserInput:
 		if len(ce.Args) != len(nextStep.UserInputParams.Fields) {
@@ -576,6 +587,9 @@ func doLoginStep(ce *Event, login bridgev2.LoginProcess, step *bridgev2.LoginSte
 			Login:    login.(bridgev2.LoginProcessWebAuthn),
 			Override: override,
 		}).prompt(ce, step.WebAuthnParams)
+	case bridgev2.LoginStepTypeClientHTTP:
+		ce.Reply("This login flow requires a client that supports client HTTP requests")
+		login.Cancel()
 	case bridgev2.LoginStepTypeComplete:
 		if override != nil && override.ID != step.CompleteParams.UserLoginID {
 			ce.Log.Info().

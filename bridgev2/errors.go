@@ -41,6 +41,7 @@ var ErrDirectMediaNotEnabled = errors.New("direct media is not enabled")
 var ErrPortalIsDeleted = errors.New("portal is deleted")
 var ErrPortalNotFoundInEventHandler = errors.New("portal not found to handle remote event")
 var ErrSplitPortalMigrationFailed = errors.New("failed to migrate to split portals")
+var ErrCannotDisableSplitPortals = errors.New("split portals are disabled in the config, but the database has already been migrated to split portals")
 
 // Common message status errors
 var (
@@ -117,6 +118,10 @@ func (re RespError) Is(err error) bool {
 
 func (re RespError) Write(w http.ResponseWriter) {
 	mautrix.RespError(re).Write(w)
+}
+
+func (re RespError) WithInternalError(err error) RespError {
+	return RespError(mautrix.RespError(re).WithInternalError(err))
 }
 
 func (re RespError) WithMessage(msg string, args ...any) RespError {
