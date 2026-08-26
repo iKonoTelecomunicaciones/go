@@ -228,6 +228,7 @@ func (cond *PushCondition) matchValue(evt *event.Event) bool {
 	switch cond.Kind {
 	case KindEventMatch, KindRelatedEventMatch, KindUnstableRelatedEventMatch:
 		pattern := glob.CompileWithImplicitContains(cond.Pattern)
+		//lint:ignore SA4023 defensive nil check kept in case glob.CompileWithImplicitContains starts returning nil again
 		if pattern == nil {
 			return false
 		}
