@@ -51,6 +51,7 @@ type ManualBackfill struct {
 	Portal *Portal
 	Data   *FetchMessagesResponse
 
+	LogContext   func(zerolog.Context) zerolog.Context
 	DoneCallback func(error)
 }
 
@@ -122,11 +123,14 @@ func (br *Bridge) RunBackfillQueue() {
 }
 
 func (mt *ManualBackfill) addLogAndDo(ctx context.Context) {
-	log := zerolog.Ctx(ctx).With().
+	with := zerolog.Ctx(ctx).With().
 		Object("portal_key", mt.Portal.PortalKey).
 		Str("login_id", string(mt.Source.ID)).
-		Str("task_type", "manual").
-		Logger()
+		Str("task_type", "manual")
+	if mt.LogContext != nil {
+		with = mt.LogContext(with)
+	}
+	log := with.Logger()
 	ctx = log.WithContext(ctx)
 	mt.Do(ctx)
 }
@@ -171,6 +175,7 @@ func (mt *ManualBackfill) Do(ctx context.Context) {
 	} else if completed, err = mt.Portal.doBackfillTask(ctx, mt.Source, task, mt.Data); err != nil {
 		log.Err(err).Msg("Failed to do backwards backfill from event")
 		updateTask = errors.Is(err, errNoMessagesLeftAfterCutoff)
+		completed = true
 	} else {
 		log.Debug().Bool("completed", completed).Msg("Finished backfill from event")
 		updateTask = true

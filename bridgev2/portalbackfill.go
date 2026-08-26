@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exslices"
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/variationselector"
 
@@ -251,9 +252,11 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 	}
 	if forward {
 		cutoff := -1
+		var cutoffIDs []networkid.MessageID
 		for i, msg := range messages {
-			if msg.ID == lastMessage.ID || msg.Timestamp.Before(lastMessage.Timestamp) {
+			if msg.ID == lastMessage.ID || !msg.Timestamp.After(lastMessage.Timestamp) {
 				cutoff = i
+				cutoffIDs = append(cutoffIDs, msg.ID)
 			} else {
 				break
 			}
@@ -261,6 +264,7 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 		if cutoff != -1 {
 			zerolog.Ctx(ctx).Debug().
 				Int("cutoff_count", cutoff+1).
+				Strs("cutoff_ids", exslices.CastToString[string](cutoffIDs)).
 				Int("total_count", len(messages)).
 				Time("last_bridged_ts", lastMessage.Timestamp).
 				Msg("Cutting off forward backfill messages older than latest bridged message")
@@ -268,9 +272,11 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 		}
 	} else {
 		cutoff := -1
+		var cutoffIDs []networkid.MessageID
 		for i := len(messages) - 1; i >= 0; i-- {
-			if messages[i].ID == lastMessage.ID || messages[i].Timestamp.After(lastMessage.Timestamp) {
+			if messages[i].ID == lastMessage.ID || !messages[i].Timestamp.Before(lastMessage.Timestamp) {
 				cutoff = i
+				cutoffIDs = append(cutoffIDs, messages[i].ID)
 			} else {
 				break
 			}
@@ -278,6 +284,7 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 		if cutoff != -1 {
 			zerolog.Ctx(ctx).Debug().
 				Int("cutoff_count", len(messages)-cutoff).
+				Strs("cutoff_ids", exslices.CastToString[string](cutoffIDs)).
 				Int("total_count", len(messages)).
 				Time("oldest_bridged_ts", lastMessage.Timestamp).
 				Msg("Cutting off backward backfill messages newer than oldest bridged message")
@@ -382,7 +389,7 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 		return
 	}
 	replyTo, threadRoot, prevThreadEvent := portal.getRelationMeta(
-		ctx, msg.ID, msg.ConvertedMessage, true,
+		ctx, source, msg.ID, msg.ConvertedMessage, true,
 	)
 	if threadRoot != nil && out.PrevThreadEvents[*msg.ThreadRoot] != "" {
 		prevThreadEvent.MXID = out.PrevThreadEvents[*msg.ThreadRoot]
@@ -590,7 +597,7 @@ func (portal *Portal) sendLegacyBackfill(ctx context.Context, source *UserLogin,
 		if !ok {
 			continue
 		}
-		dbMessages, res := portal.sendConvertedMessage(ctx, msg.ID, intent, msg.Sender.Sender, msg.ConvertedMessage, msg.Timestamp, msg.StreamOrder, func(z *zerolog.Event) *zerolog.Event {
+		dbMessages, res := portal.sendConvertedMessage(ctx, source, msg.ID, intent, msg.Sender.Sender, msg.ConvertedMessage, msg.Timestamp, msg.StreamOrder, func(z *zerolog.Event) *zerolog.Event {
 			return z.
 				Str("message_id", string(msg.ID)).
 				Any("sender_id", msg.Sender).
